@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Board from './components/Board';
 
 const createEmptyBoard = () => {
@@ -79,12 +79,29 @@ const applyShot = (grid, ships, row, col) => {
 };
 
 const App = () => {
+  const [mode, setMode] = useState('normal');
+  const [playerShotsLeft, setPlayerShotsLeft] = useState(5);
+  const [botShotsLeft, setBotShotsLeft] = useState(5);
+  const [playerTurn, setPlayerTurn] = useState(true);
+  const [pendingShots, setPendingShots] = useState(0);
+
   const [playerGrid, setPlayerGrid] = useState(createEmptyBoard());
   const [botGrid, setBotGrid] = useState(createEmptyBoard());
   const [playerShips, setPlayerShips] = useState([]);
   const [botShips, setBotShips] = useState([]);
   const [message, setMessage] = useState('');
   const [gameOver, setGameOver] = useState(false);
+
+  const playerGridRef = useRef(playerGrid);
+  const playerShipsRef = useRef(playerShips);
+
+  useEffect(() => {
+    playerGridRef.current = playerGrid;
+  }, [playerGrid]);
+
+  useEffect(() => {
+    playerShipsRef.current = playerShips;
+  }, [playerShips]);
 
   const startGame = () => {
     const ships = [5, 4, 3, 3, 2];
@@ -96,26 +113,32 @@ const App = () => {
     setBotShips(bot.ships);
     setMessage('');
     setGameOver(false);
+    setPlayerShotsLeft(ships.length);
+    setBotShotsLeft(ships.length);
+    setPlayerTurn(true);
+    setPendingShots(mode === 'oneShotPerShip' ? ships.length : 1);
   };
 
   useEffect(() => {
     startGame();
-  }, []);
+  }, [mode]);
 
   const handlePlayerShot = (row, col) => {
-    if (gameOver || botGrid[row][col].hit) return;
+    if (gameOver || !playerTurn || botGrid[row][col].hit || pendingShots <= 0) return;
 
     const { newGrid, newShips, result, allSunk } = applyShot(botGrid, botShips, row, col);
     setBotGrid(newGrid);
     setBotShips(newShips);
 
-    if (result === 'agua') {
-      setMessage('💦 Agua.');
-    } else if (result === 'tocado') {
-      setMessage('🎯 ¡Tocado!');
-    } else if (result === 'hundido') {
-      setMessage('💥 ¡Hundiste un barco!');
+    if (mode !== 'hard') {
+      if (result === 'agua') setMessage('💦 Agua.');
+      if (result === 'tocado') setMessage('🎯 ¡Tocado!');
+      if (result === 'hundido') setMessage('💥 ¡Hundiste un barco!');
     }
+
+    if (result === 'hundido' && mode === 'oneShotPerShip') {
+  setBotShotsLeft(prev => Math.max(prev - 1, 0));  // CORREGIDO: se quita disparo al bot
+}
 
     if (allSunk) {
       setMessage('🏆 ¡Ganaste la partida!');
@@ -123,54 +146,103 @@ const App = () => {
       return;
     }
 
-    setTimeout(() => {
-      handleBotShot();
-    }, 800);
+    setPendingShots(prev => prev - 1);
   };
 
-  const handleBotShot = () => {
+  useEffect(() => {
+    if (pendingShots === 0 && playerTurn && !gameOver) {
+      setTimeout(() => {
+        setPlayerTurn(false);
+        const botShots = mode === 'oneShotPerShip' ? botShotsLeft : 1;
+        handleBotTurn(botShots);
+      }, 800);
+    }
+  }, [pendingShots, playerTurn, gameOver]);
+
+  const handleBotTurn = (shotsRemaining) => {
+    if (shotsRemaining <= 0 || gameOver) {
+      setPlayerTurn(true);
+      const playerRemaining = mode === 'oneShotPerShip' ? playerShotsLeft : 1;
+      setPendingShots(playerRemaining);
+      return;
+    }
+
+    // Usa el estado más actualizado desde refs
+    const currentGrid = playerGridRef.current;
+    const currentShips = playerShipsRef.current;
+
     const available = [];
-    for (let i = 0; i < playerGrid.length; i++) {
-      for (let j = 0; j < playerGrid[i].length; j++) {
-        if (!playerGrid[i][j].hit) {
+    for (let i = 0; i < currentGrid.length; i++) {
+      for (let j = 0; j < currentGrid[i].length; j++) {
+        if (!currentGrid[i][j].hit) {
           available.push([i, j]);
         }
       }
     }
 
+    if (available.length === 0) return;
+
     const [row, col] = available[Math.floor(Math.random() * available.length)];
 
-    const { newGrid, newShips, result, allSunk } = applyShot(playerGrid, playerShips, row, col);
+    // Clona para no mutar
+    const tempGrid = currentGrid.map(row => row.map(cell => ({ ...cell })));
+    const tempShips = currentShips.map(ship => ({ ...ship, positions: [...ship.positions] }));
+
+    const { newGrid, newShips, result, allSunk } = applyShot(tempGrid, tempShips, row, col);
+
+    // Actualiza estados usando función para evitar batch
     setPlayerGrid(newGrid);
     setPlayerShips(newShips);
 
-    if (result === 'agua') {
-      setMessage('La máquina falló 💨');
-    } else if (result === 'tocado') {
-      setMessage('La máquina te dio 😬');
-    } else if (result === 'hundido') {
+    if (result === 'agua') setMessage('La máquina falló 💨');
+    if (result === 'tocado') setMessage('La máquina te dio 😬');
+    if (result === 'hundido') {
       setMessage('La máquina te hundió un barco 😵');
+      if (mode === 'oneShotPerShip') {
+        setPlayerShotsLeft(prev => Math.max(prev - 1, 0));  // CORREGIDO: se quita disparo a ti
+      }
     }
 
     if (allSunk) {
       setMessage('😵 ¡Perdiste la partida!');
       setGameOver(true);
+      return;
     }
+
+    setTimeout(() => {
+      handleBotTurn(shotsRemaining - 1);
+    }, 500);
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-200 to-blue-500 p-8 text-center">
       <h1 className="text-5xl font-extrabold text-white drop-shadow mb-8">🚢 Battleship</h1>
+      <div className="mb-6">
+        <button
+          onClick={() => {
+            if (!gameOver) {
+              const confirmRestart = window.confirm('¿Cambiar modo y reiniciar partida?');
+              if (!confirmRestart) return;
+            }
+            setMode(prev =>
+              prev === 'normal' ? 'oneShotPerShip' : prev === 'oneShotPerShip' ? 'hard' : 'normal'
+            );
+          }}
+          className="bg-white text-blue-700 px-4 py-2 rounded shadow hover:bg-blue-100"
+        >
+          Cambiar modo ({mode})
+        </button>
+      </div>
       <div className="flex justify-center gap-16">
-  <div className="bg-white/70 rounded-2xl shadow-lg p-4">
-    <h2 className="text-xl font-bold text-blue-900 mb-2">🌊 Tu tablero</h2>
-    <Board grid={playerGrid} isPlayer={true} />
-  </div>
-  <div className="bg-white/70 rounded-2xl shadow-lg p-4">
-    <h2 className="text-xl font-bold text-red-700 mb-2">🎯 Tablero enemigo</h2>
-    <Board grid={botGrid} isPlayer={false} onCellClick={handlePlayerShot} />
-  </div>
-</div>
+        <div className="bg-white/70 rounded-2xl shadow-lg p-4">
+          <h2 className="text-xl font-bold text-blue-900 mb-2">🌊 Tu tablero</h2>
+          <Board grid={playerGrid} isPlayer={true} mode={mode} />
+        </div>
+        <div className="bg-white/70 rounded-2xl shadow-lg p-4">
+          <h2 className="text-xl font-bold text-red-700 mb-2">🎯 Tablero enemigo</h2>
+          <Board grid={botGrid} isPlayer={false} onCellClick={handlePlayerShot} mode={mode} />
+        </div>
+      </div>
 
       {message && (
         <div className="mt-6 text-xl font-semibold text-gray-800 bg-white py-2 px-4 rounded shadow inline-block">
