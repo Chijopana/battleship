@@ -4,7 +4,7 @@ import { io } from 'socket.io-client';
 const SERVER_URL =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SOCKET_URL) ||
   (typeof process !== 'undefined' && process.env?.REACT_APP_SOCKET_URL) ||
-  'http://localhost:3001';
+  'https://battleship-bx9q.onrender.com';
 
 function getOrCreateSocket() {
   if (typeof window === 'undefined') return null;
