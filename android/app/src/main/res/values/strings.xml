@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">battleship</string>
+    <string name="title_activity_main">battleship</string>
+    <string name="package_name">com.chijogames.app</string>
+    <string name="custom_url_scheme">com.chijogames.app</string>
+</resources>

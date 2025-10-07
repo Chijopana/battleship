@@ -1,0 +1,5 @@
+{
+  "appId": "com.chijogames.app",
+  "appName": "battleship",
+  "webDir": "dist"
+}
