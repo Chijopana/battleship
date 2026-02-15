@@ -1,3 +1,135 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Animaciones personalizadas para mayor interactividad */
+@keyframes explosion {
+  0% {
+    transform: scale(0.8) rotate(0deg);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.3) rotate(180deg);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1) rotate(360deg);
+    opacity: 0;
+  }
+}
+
+@keyframes impact {
+  0% {
+    box-shadow: 0 0 10px rgba(255, 0, 0, 0.8), inset 0 0 5px rgba(255, 0, 0, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(255, 0, 0, 1), inset 0 0 10px rgba(255, 0, 0, 0.8);
+  }
+  100% {
+    box-shadow: 0 0 0px rgba(255, 0, 0, 0);
+  }
+}
+
+@keyframes shipSink {
+  0% {
+    transform: translateY(-5px) rotate(-2deg);
+    opacity: 1;
+  }
+  50% {
+    transform: translateY(0px) rotate(0deg);
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(5px) rotate(2deg);
+    opacity: 0.6;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 5px rgba(59, 130, 246, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.9);
+  }
+}
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideOutUp {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+@keyframes wobble {
+  0% { transform: rotate(-1deg) scale(0.98); }
+  50% { transform: rotate(1deg) scale(1.02); }
+  100% { transform: rotate(-1deg) scale(0.98); }
+}
+
+/* Clases de animación */
+.animate-explosion {
+  animation: explosion 0.6s ease-out 1 forwards;
+}
+
+.animate-impact {
+  animation: impact 0.4s ease-out 1 forwards;
+}
+
+.animate-ship-sink {
+  animation: shipSink 1.5s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+.animate-slide-in {
+  animation: slideInDown 0.3s ease-out 1 forwards;
+}
+
+.animate-slide-out {
+  animation: slideOutUp 0.3s ease-out 1 forwards;
+}
+
+.animate-wobble {
+  animation: wobble 0.5s ease-in-out 1 forwards;
+}
+
+/* Permite scroll normal en la página */
+html {
+  overflow-y: auto;
+}
+
+body {
+  overflow-y: auto;
+}
+
+/* Solo quitar scroll del contenedor de tableros */
+.overflow-stable {
+  overflow: hidden;
+}

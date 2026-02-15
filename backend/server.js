@@ -11,7 +11,39 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3001;
 
-// ----------------- PARTIDAS -----------------
+// ----------------- RATE LIMITING BÁSICO -----------------
+const playerActivity = new Map();
+const RATE_LIMIT_WINDOW = 1000; // 1 segundo
+const MAX_SHOTS_PER_WINDOW = 1; // máximo 1 disparo por segundo
+
+const checkRateLimit = (playerId) => {
+  const now = Date.now();
+  if (!playerActivity.has(playerId)) {
+    playerActivity.set(playerId, []);
+  }
+  const times = playerActivity.get(playerId);
+  playerActivity.set(playerId, times.filter(t => t > now - RATE_LIMIT_WINDOW));
+  const current = playerActivity.get(playerId);
+  
+  if (current.length >= MAX_SHOTS_PER_WINDOW) return false;
+  current.push(now);
+  return true;
+};
+
+// Limpiar activity vieja periodicamente
+setInterval(() => {
+  const now = Date.now();
+  for (const [pid, times] of playerActivity.entries()) {
+    const filtered = times.filter(t => t > now - RATE_LIMIT_WINDOW * 10);
+    if (filtered.length === 0) {
+      playerActivity.delete(pid);
+    } else {
+      playerActivity.set(pid, filtered);
+    }
+  }
+}, 10000);
+
+// --------------------- PARTIDAS ---------------------
 const games = new Map();
 const GAME_TTL_MS = 1000 * 60 * 10; // 10 minutos
 
@@ -81,6 +113,8 @@ io.on('connection', (socket) => {
         game.players.push(socket.id);
         delete game.disconnected[socket.id];
         socket.join(gameId);
+        const opponentId = game.players.find(p => p !== socket.id);
+        if (opponentId) io.to(opponentId).emit('opponentReconnected', { room: gameId });
         emitPlayers(gameId);
         return cb?.({ success: true, reconnect: true, gameId, playerId: socket.id });
       }
@@ -111,8 +145,11 @@ io.on('connection', (socket) => {
       game.ready[socket.id] = true;
       cb?.({ success: true });
 
+      // Si ambos están listos, comienza el juego
       if (Object.keys(game.ready).length === 2) {
-        io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: game.turn });
+        const startedPlayer = game.turn || game.players[0];
+        io.to(gameId).emit('gameStarted', { room: gameId, startedBy: startedPlayer });
+        io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: startedPlayer });
       }
     } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
   });
@@ -120,6 +157,11 @@ io.on('connection', (socket) => {
   // -------- PLAYER SHOT --------
   socket.on('playerShot', ({ gameId: raw, row, col } = {}, cb) => {
     try {
+      // Rate limiting
+      if (!checkRateLimit(socket.id)) {
+        return cb?.({ error: 'Demasiados disparos muy rápido. Espera un momento.' });
+      }
+
       const gameId = raw?.trim()?.toUpperCase() || inferRoom(socket);
       const game = games.get(gameId);
       if (!game) return cb?.({ error: 'Partida no encontrada' });
@@ -128,12 +170,20 @@ io.on('connection', (socket) => {
       const opponentId = game.players.find(id => id !== socket.id);
       if (!opponentId) return cb?.({ error: 'Esperando rival' });
 
+      // Validar coordenadas
+      if (typeof row !== 'number' || typeof col !== 'number' || row < 0 || row >= 10 || col < 0 || col >= 10) {
+        return cb?.({ error: 'Coordenadas inválidas' });
+      }
+
       // Guardar en historial
       game.history.push({ type: 'shot', player: socket.id, row, col, ts: Date.now() });
 
       io.to(opponentId).emit('incomingShot', { room: gameId, row, col, from: socket.id });
       cb?.({ success: true });
-    } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
+    } catch (err) { 
+      console.error('[ERROR] playerShot:', err); 
+      cb?.({ error: 'Error interno' }); 
+    }
   });
 
   // -------- SHOT RESULT --------
@@ -149,15 +199,15 @@ io.on('connection', (socket) => {
       // Guardar en historial
       game.history.push({ type: 'result', player: socket.id, attacker: attackerId, result, row, col, allSunk, ts: Date.now() });
 
-      io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk });
-
       if (allSunk) {
+        io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer: null });
         io.to(gameId).emit('gameOver', { room: gameId, winner: attackerId, loser: socket.id });
         game.turn = null;
         scheduleCleanupIfEmpty(gameId);
       } else {
-        game.turn = socket.id;
-        io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: socket.id });
+        game.turn = attackerId;
+        io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer: attackerId });
+        io.to(socket.id).emit('beginTurn', { room: gameId, currentPlayer: attackerId });
       }
       cb?.({ success: true });
     } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
@@ -180,6 +230,31 @@ io.on('connection', (socket) => {
     } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
   });
 
+  // -------- LEAVE GAME (Salida voluntaria) --------
+  socket.on('leaveGame', (gameIdRaw, cb) => {
+    try {
+      const gameId = gameIdRaw?.trim()?.toUpperCase() || inferRoom(socket);
+      const game = games.get(gameId);
+      if (!game) return cb?.({ error: 'Partida no encontrada' });
+
+      const opponentId = game.players.find(p => p !== socket.id);
+      game.players = game.players.filter(p => p !== socket.id);
+      delete game.boards[socket.id];
+      delete game.ready[socket.id];
+      if (game.turn === socket.id) game.turn = game.players[0] || null;
+
+      if (opponentId) {
+        io.to(opponentId).emit('opponentLeft', { room: gameId });
+      }
+      emitPlayers(gameId);
+      scheduleCleanupIfEmpty(gameId);
+      
+      socket.leave(gameId);
+      cb?.({ success: true });
+      console.log(`[👋 Leave] ${socket.id.substring(0, 8)} dejó la partida ${gameId}`);
+    } catch (err) { console.error('[ERROR] leaveGame:', err); cb?.({ error: 'Error interno' }); }
+  });
+
   // -------- DISCONNECT --------
   socket.on('disconnect', () => {
     console.log(`- Desconectado: ${socket.id}`);
@@ -195,9 +270,10 @@ io.on('connection', (socket) => {
       // Guardar para reconexion
       game.disconnected[socket.id] = Date.now();
 
-      if (opponentId) io.to(opponentId).emit('opponentLeft', { room: gameId });
+      if (opponentId) {
+        io.to(opponentId).emit('opponentDisconnected', { room: gameId });
+      }
       emitPlayers(gameId);
-
       scheduleCleanupIfEmpty(gameId);
     }
   });

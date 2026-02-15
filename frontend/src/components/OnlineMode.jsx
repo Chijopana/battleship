@@ -43,6 +43,9 @@ const OnlineMode = ({
 
   const socketRef = useRef(null);
   const mountedRef = useRef(true);
+  const gameIdRef = useRef('');
+  const listenersSetupRef = useRef(false);
+  const lastShotTimeRef = useRef(0);
 
   /* ========================
      🧠 Conexión Socket
@@ -51,6 +54,8 @@ const OnlineMode = ({
     mountedRef.current = true;
     const s = getOrCreateSocket();
     socketRef.current = s;
+    gameIdRef.current = gameId;
+    
     if (!s) return () => { mountedRef.current = false; };
 
     const onConnect = () => {
@@ -59,28 +64,38 @@ const OnlineMode = ({
       setPlayerId(s.id);
       setSocketInstance?.(s);
       setStatus('✅ Conectado al servidor');
+      console.log('[Socket] Conectado:', s.id);
     };
 
     const onConnectError = (err) => {
       if (!mountedRef.current) return;
       setStatus('❌ No se pudo conectar');
       setSocketReady(false);
+      console.error('[Socket] Error de conexión:', err);
     };
 
-    const onReconnectAttempt = (attempt) => {
+    const onReconnect = () => {
       if (!mountedRef.current) return;
-      setStatus(`Reintentando conexión (${attempt})...`);
+      setSocketReady(true);
+      setStatus('✅ Reconectado');
+      if (gameIdRef.current) {
+        s.emit('joinGame', gameIdRef.current, (res) => {
+          if (res?.error) setStatus('❌ ' + res.error);
+          else setStatus('✅ Vuelto a unir a la sala');
+        });
+      }
     };
 
     const onDisconnect = (reason) => {
       if (!mountedRef.current) return;
       setSocketReady(false);
-      setStatus(`Desconectado: ${reason}`);
+      setStatus(`⚠️ Desconectado: ${reason}`);
+      console.warn('[Socket] Desconectado:', reason);
     };
 
     s.on('connect', onConnect);
     s.on('connect_error', onConnectError);
-    s.on('reconnect_attempt', onReconnectAttempt);
+    s.on('reconnect', onReconnect);
     s.on('disconnect', onDisconnect);
 
     if (!s.connected) s.connect();
@@ -89,7 +104,7 @@ const OnlineMode = ({
       mountedRef.current = false;
       s.off('connect', onConnect);
       s.off('connect_error', onConnectError);
-      s.off('reconnect_attempt', onReconnectAttempt);
+      s.off('reconnect', onReconnect);
       s.off('disconnect', onDisconnect);
     };
   }, [setSocketInstance]);
@@ -97,44 +112,53 @@ const OnlineMode = ({
   /* ===============================
      🎧 Listeners de eventos de juego
   ================================ */
-  const setupGameListeners = useCallback(() => {
+  useEffect(() => {
     const s = socketRef.current;
-    if (!s) return;
+    if (!s || !isOnline) return;
 
-    const safeOn = (event, handler) => {
-      s.off(event);
-      s.on(event, handler);
-    };
+    // Solo configurar listeners una vez
+    if (listenersSetupRef.current) return;
+    listenersSetupRef.current = true;
 
-    safeOn('playerJoined', ({ players }) => {
+    console.log('[GameListeners] Configurando listeners del juego');
+
+    const onPlayerJoined = ({ players }) => {
       if (!mountedRef.current) return;
       const txt = players.length === 2
         ? '👾 Rival conectado. Preparando partida...'
         : `Jugadores en sala: ${players.length}/2`;
       setStatus(txt);
+      console.log('[GameEvent] playerJoined - Jugadores:', players.length);
+    };
 
-      if (players.length === 2) {
-        s.emit('sendBoard', { gameId, board: playerGrid });
-      }
-    });
+    const onGameStarted = ({ startedBy }) => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] gameStarted - Iniciado por:', startedBy);
+      setMessage('🎮 ¡Partida iniciada!');
+    };
 
-    safeOn('beginTurn', ({ currentPlayer }) => {
+    const onBeginTurn = ({ currentPlayer }) => {
       if (!mountedRef.current) return;
       const amI = s.id === currentPlayer;
       switchOnlineTurn?.(amI);
       setStatus(amI ? '🔥 Tu turno' : '⏳ Turno del rival');
-    });
+      console.log('[GameEvent] beginTurn - Tu turno:', amI, '| currentPlayer:', currentPlayer.substring(0, 8), 'Tu ID:', s.id.substring(0, 8));
+    };
 
-    safeOn('incomingShot', ({ row, col, from }) => {
+    const onIncomingShot = ({ row, col, from }) => {
       if (!mountedRef.current) return;
+      console.log('[GameEvent] incomingShot - Disparo en:', row, col);
       handleIncomingShot?.(row, col, (result, allSunk) => {
-        s.emit('shotResult', { gameId, result, row, col, from, allSunk });
+        const gId = gameIdRef.current;
+        console.log('[Response] Enviando shotResult -', { result, row, col, allSunk, gameId: gId });
+        s.emit('shotResult', { gameId: gId, result, row, col, from, allSunk });
       });
-    });
+    };
 
-    safeOn('shotFeedback', ({ result, row, col, nextPlayer, allSunk }) => {
+    const onShotFeedback = ({ result, row, col, nextPlayer, allSunk }) => {
       if (!mountedRef.current) return;
-
+      console.log('[GameEvent] shotFeedback - Resultado:', result, '| nextPlayer:', nextPlayer?.substring(0, 8));
+      
       setOpponentGrid(prev => {
         if (!prev) return prev;
         const newGrid = prev.map(r => r.map(c => ({ ...c })));
@@ -147,31 +171,67 @@ const OnlineMode = ({
 
       const msg = result === 'agua' ? '💦 Fallaste' :
                   result === 'tocado' ? '🎯 ¡Tocado!' :
-                  '💥 ¡Hundiste un barco!';
+                  result === 'hundido' ? '💥 ¡Hundiste un barco!' :
+                  '❓ Resultado desconocido';
       setMessage?.(msg);
 
       if (allSunk) {
         setMessage?.('🏆 ¡Ganaste la partida!');
         setGameOver?.(true);
-        setStatus?.('');
-      } else {
-        const amINext = nextPlayer === s.id;
-        switchOnlineTurn?.(amINext);
-        setStatus?.(amINext ? '🔥 Tu turno' : '⏳ Turno del rival');
+        setStatus?.('✅ Victoria');
       }
-    });
+    };
 
-    safeOn('playerDisconnected', () => {
+    const onGameOver = ({ winner, loser }) => {
       if (!mountedRef.current) return;
-      setStatus('⚠️ Rival desconectado. Volviendo a modo local...');
+      const iWon = s.id === winner;
+      console.log('[GameEvent] gameOver - Ganador:', winner.substring(0, 8), '| Yo:', s.id.substring(0, 8));
+      if (!iWon) {
+        setMessage?.('😵 ¡Perdiste la partida!');
+        setGameOver?.(true);
+      }
+    };
+
+    const onOpponentLeft = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] opponentLeft');
       setIsOnline?.(false);
       startGame?.();
-    });
-  }, [gameId, playerGrid, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame]);
+    };
 
-  useEffect(() => {
-    setupGameListeners();
-  }, [setupGameListeners]);
+    const onOpponentDisconnected = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] opponentDisconnected');
+    };
+
+    const onOpponentReconnected = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] opponentReconnected');
+    };
+
+    s.on('playerJoined', onPlayerJoined);
+    s.on('gameStarted', onGameStarted);
+    s.on('beginTurn', onBeginTurn);
+    s.on('incomingShot', onIncomingShot);
+    s.on('shotFeedback', onShotFeedback);
+    s.on('opponentLeft', onOpponentLeft);
+    s.on('opponentDisconnected', onOpponentDisconnected);
+    s.on('opponentReconnected', onOpponentReconnected);
+    s.on('gameOver', onGameOver);
+
+    return () => {
+      s.off('playerJoined', onPlayerJoined);
+      s.off('gameStarted', onGameStarted);
+      s.off('beginTurn', onBeginTurn);
+      s.off('incomingShot', onIncomingShot);
+      s.off('shotFeedback', onShotFeedback);
+      s.off('opponentLeft', onOpponentLeft);
+      s.off('opponentDisconnected', onOpponentDisconnected);
+      s.off('opponentReconnected', onOpponentReconnected);
+      s.off('gameOver', onGameOver);
+      listenersSetupRef.current = false;
+    };
+  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame]);
 
   /* ======================
      🛠️ Funciones de juego
@@ -182,107 +242,152 @@ const OnlineMode = ({
     const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
     setIsConnecting(true);
     setIsHost(true);
+    console.log('[Action] Creando sala:', newId);
+    
     s.emit('joinGame', newId, (res) => {
       setIsConnecting(false);
-      if (res?.error) return setStatus(res.error);
+      if (res?.error) {
+        console.error('[Error] Error al crear sala:', res.error);
+        return setStatus('❌ ' + res.error);
+      }
       setGameId(newId);
+      gameIdRef.current = newId;
       setStatus(`Sala creada: ${newId} 🧭 Esperando rival...`);
       setIsOnline?.(true);
       startGame?.();
+      // Enviar tablero después de entrar a la sala
+      setTimeout(() => {
+        s.emit('sendBoard', { gameId: newId, board: playerGrid });
+      }, 100);
     });
-  }, [setIsOnline, startGame]);
+  }, [setIsOnline, startGame, playerGrid]);
 
   const joinGame = useCallback(() => {
     const s = socketRef.current;
-    if (!s || !s.connected) { setStatus('No conectado'); return; }
-    if (!gameId) return setStatus('Ingresa un ID válido');
+    if (!s || !s.connected) { setStatus('❌ No conectado al servidor'); return; }
+    if (!gameId) return setStatus('⚠️ Ingresa un ID válido');
+    
+    // Validar formato de ID
+    if (!/^[A-Z0-9_-]{1,32}$/i.test(gameId.trim())) {
+      return setStatus('❌ ID inválido (solo letras, números, _, -)');
+    }
+    
     setIsConnecting(true);
-    s.emit('joinGame', gameId.toUpperCase(), (res) => {
+    const upperGameId = gameId.toUpperCase();
+    console.log('[Action] Uniéndose a sala:', upperGameId);
+    
+    s.emit('joinGame', upperGameId, (res) => {
       setIsConnecting(false);
-      if (res?.error) return setStatus(res.error);
-      setStatus(`Unido a sala ${gameId} ✨`);
+      if (res?.error) {
+        console.error('[Error] Error al unirse:', res.error);
+        return setStatus('❌ ' + res.error);
+      }
+      gameIdRef.current = upperGameId;
+      setStatus(`Unido a sala ${upperGameId} ✨`);
       setIsOnline?.(true);
       startGame?.();
-      s.emit('sendBoard', { gameId: gameId.toUpperCase(), board: playerGrid });
+      // Enviar tablero después de entrar a la sala
+      setTimeout(() => {
+        s.emit('sendBoard', { gameId: upperGameId, board: playerGrid });
+      }, 100);
     });
   }, [gameId, playerGrid, setIsOnline, startGame]);
 
   const copyGameId = useCallback(async () => {
     if (!gameId) return;
-    try { await navigator.clipboard.writeText(gameId); setStatus('📋 ID copiado'); }
-    catch { setStatus('No se pudo copiar'); }
+    try {
+      await navigator.clipboard.writeText(gameId);
+      setStatus('📋 ID copiado al portapapeles');
+    }
+    catch {
+      setStatus('❌ No se pudo copiar');
+    }
   }, [gameId]);
 
   const handleModeSwitch = useCallback((toOnline) => {
+    const s = socketRef.current;
     if (!toOnline) {
-      if (!window.confirm('¿Volver a modo local y reiniciar partida?')) return;
+      if (!window.confirm('¿Volver a modo local y abandonar la partida?')) return;
+      // Salir sin notificar al rival
+      if (isOnline && s && gameIdRef.current) {
+        s.emit('leaveGame', gameIdRef.current);
+      }
       setIsOnline?.(false);
       setStatus('Modo local');
+      gameIdRef.current = '';
+      listenersSetupRef.current = false;
       startGame?.();
       return;
     }
     if (!window.confirm('¿Cambiar a modo online y reiniciar partida?')) return;
     setIsOnline?.(true);
     setStatus('Modo online 🌐 Conéctate o crea sala');
-  }, [setIsOnline, startGame]);
+    gameIdRef.current = '';
+    listenersSetupRef.current = false;
+  }, [setIsOnline, startGame, isOnline]);
 
   /* ======================
      🎨 UI Mejorada para móvil
   ====================== */
   return (
-    <div className="flex flex-col gap-3 items-center bg-white/70 p-4 rounded-lg shadow-md w-full sm:w-auto">
+    <div className="flex flex-col gap-3 items-center bg-gradient-to-br from-blue-600/20 to-purple-600/20 backdrop-blur p-4 sm:p-5 rounded-xl shadow-lg border border-white/20 w-full sm:w-auto">
       {/* Switch Modo Local / Online */}
       <div className="flex flex-col sm:flex-row gap-2 w-full justify-center">
         <button
           onClick={() => handleModeSwitch(false)}
-          className={`w-full sm:w-auto px-4 py-2 font-bold rounded ${!isOnline ? 'bg-blue-700 text-white' : 'bg-gray-200 text-gray-700'} transition-colors`}
+          className={`w-full sm:w-auto px-4 py-3 font-bold rounded-lg transition-all active:scale-95 ${!isOnline ? 'bg-blue-700 text-white shadow-lg' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
-          Modo Local
+          🌐 Modo Local
         </button>
         <button
           onClick={() => handleModeSwitch(true)}
-          className={`w-full sm:w-auto px-4 py-2 font-bold rounded ${isOnline ? 'bg-red-600 text-white' : 'bg-gray-200 text-gray-700'} transition-colors`}
+          className={`w-full sm:w-auto px-4 py-3 font-bold rounded-lg transition-all active:scale-95 ${isOnline ? 'bg-red-600 text-white shadow-lg' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
         >
-          Modo Online
+          🔴 Modo Online
         </button>
       </div>
 
       {/* Controles Online */}
       {isOnline && (
         <div className="flex flex-col gap-3 w-full items-center">
-          <div className="flex flex-col sm:flex-row gap-2 w-full justify-center items-center">
+          <div className="flex flex-col sm:flex-row gap-2 w-full justify-center items-stretch sm:items-center">
             <input
               type="text"
               value={gameId}
               onChange={(e) => setGameId(e.target.value.toUpperCase())}
-              placeholder="ID de partida"
-              className="w-full sm:w-auto px-3 py-2 rounded border focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="ID de partida (ej: ABC123)"
+              maxLength={32}
+              className="w-full sm:w-auto px-3 py-2 rounded-lg border-2 border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent disabled:bg-gray-100"
               disabled={isConnecting}
             />
             <button
               onClick={joinGame}
-              disabled={isConnecting}
-              className="bg-green-600 text-white px-4 py-2 rounded w-full sm:w-auto font-semibold"
+              disabled={isConnecting || !gameId}
+              className="bg-green-600 text-white px-4 py-2 rounded-lg w-full sm:w-auto font-semibold hover:bg-green-700 disabled:bg-gray-400 active:scale-95 transition-all"
             >
-              Unirse
+              ✅ Unirse
             </button>
             <button
               onClick={createGame}
               disabled={isConnecting}
-              className="bg-blue-600 text-white px-4 py-2 rounded w-full sm:w-auto font-semibold"
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg w-full sm:w-auto font-semibold hover:bg-blue-700 disabled:bg-gray-400 active:scale-95 transition-all"
             >
-              Crear
+              ⚡ Crear
             </button>
             <button
               onClick={copyGameId}
               disabled={!gameId}
-              className="bg-gray-300 px-3 py-2 rounded w-full sm:w-auto font-medium"
+              className="bg-blue-400 text-white px-3 py-2 rounded-lg w-full sm:w-auto font-medium hover:bg-blue-500 disabled:bg-gray-200 active:scale-95 transition-all"
             >
-              Copiar
+              📋 Copiar
             </button>
           </div>
-          <div className="text-center text-sm sm:text-base mt-1 font-medium">{isConnecting ? 'Conectando...' : status}</div>
-          <div className="text-center text-xs text-gray-600">Servidor: {SERVER_URL}</div>
+          <div className="text-center text-sm sm:text-base mt-1 font-medium text-gray-700">
+            {isConnecting ? '⏳ Conectando...' : status}
+          </div>
+          <div className="text-center text-xs text-gray-600 mt-1">
+            🔗 Servidor: {SERVER_URL.split('//')[1]?.split('/')[0] || SERVER_URL}
+          </div>
         </div>
       )}
     </div>
