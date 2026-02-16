@@ -1,18 +1,12 @@
 [build]
-  command = "cd frontend && npm install --legacy-peer-deps && npm run build"
+  command = "cd frontend && npm ci && npm run build"
   publish = "frontend/dist"
-  functions = "backend"
 
 [build.environment]
   NODE_VERSION = "20"
   NODE_ENV = "production"
-  NPM_FLAGS = "--legacy-peer-deps"
 
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
-
-[functions]
-  directory = "backend"
-  node_bundler = "esbuild"
