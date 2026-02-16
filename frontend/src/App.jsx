@@ -79,6 +79,8 @@ const App = () => {
   const [opponentGrid, setOpponentGrid] = useState(createEmptyBoard());
   const [isMyTurnOnline, setIsMyTurnOnline] = useState(false);
   const [socketInstance, setSocketInstance] = useState(null);
+  const [waitingForOpponentRestart, setWaitingForOpponentRestart] = useState(false);
+  const [opponentWantsRestart, setOpponentWantsRestart] = useState(false);
 
   // Estadísticas
   const [playerShipsSunk, setPlayerShipsSunk] = useState(0);
@@ -177,6 +179,55 @@ const App = () => {
     setIsMyTurnOnline(isMyTurn);
     setPlayerTurn(isMyTurn);
     setPendingShots(isMyTurn ? 1 : 0);
+  };
+
+  // --- ONLINE RESTART FUNCTIONS ---
+  const handleRequestRestart = () => {
+    if (!socketInstance || !isOnline) return;
+    
+    playClickSound();
+    setWaitingForOpponentRestart(true);
+    
+    socketInstance.emit('requestRestart', null, (res) => {
+      if (res?.error) {
+        console.error('[Error] Error al solicitar reinicio:', res.error);
+        setMessage('❌ ' + res.error);
+        setWaitingForOpponentRestart(false);
+      } else if (res?.restarted) {
+        // Reinicio exitoso, startGame se llamará desde el listener gameRestarted
+        console.log('[✅ Reinicio] Partida reiniciada por ambos');
+      } else if (res?.waiting) {
+        setMessage('⏳ Esperando que el rival acepte reiniciar...');
+      }
+    });
+  };
+
+  const handleCancelRestart = () => {
+    if (!socketInstance || !isOnline) return;
+    
+    playClickSound();
+    setWaitingForOpponentRestart(false);
+    setOpponentWantsRestart(false);
+    
+    socketInstance.emit('cancelRestart', null, (res) => {
+      console.log('[❌ Reinicio] Reinicio cancelado');
+    });
+  };
+
+  const handleLeaveOnlineGame = () => {
+    if (!socketInstance || !isOnline) return;
+    
+    playClickSound();
+    
+    if (!window.confirm('¿Salir de la partida online?')) return;
+    
+    socketInstance.emit('leaveGame', null, (res) => {
+      console.log('[👋 Leave] Saliendo de partida online');
+      setIsOnline(false);
+      setWaitingForOpponentRestart(false);
+      setOpponentWantsRestart(false);
+      startGame();
+    });
   };
 
   // --- HANDLE PLAYER SHOT ---
@@ -446,6 +497,8 @@ const App = () => {
         setGameOver={setGameOver}
         setOpponentGrid={setOpponentGrid}
         updateOpponentGrid={updateOpponentGrid}
+        setWaitingForOpponentRestart={setWaitingForOpponentRestart}
+        setOpponentWantsRestart={setOpponentWantsRestart}
       />
     </div>
 
@@ -552,8 +605,8 @@ const App = () => {
       </div>
     )}
 
-    {/* Botón reiniciar partida */}
-    {gameOver && (
+    {/* Botones de reinicio - Diferentes para online y local */}
+    {gameOver && !isOnline && (
       <button
         onClick={() => {
           playClickSound();
@@ -563,6 +616,68 @@ const App = () => {
       >
         🔄 Reiniciar partida
       </button>
+    )}
+
+    {/* Botones para modo online */}
+    {gameOver && isOnline && (
+      <div className="flex flex-col sm:flex-row gap-3 items-center">
+        {!waitingForOpponentRestart && !opponentWantsRestart && (
+          <>
+            <button
+              onClick={handleRequestRestart}
+              className="bg-gradient-to-r from-green-600 to-green-800 hover:from-green-700 hover:to-green-900 text-white px-6 py-3 rounded-xl text-lg font-bold shadow-lg hover:shadow-2xl transform hover:scale-110 active:scale-95 transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-green-400"
+            >
+              ✅ Jugar otra vez
+            </button>
+            <button
+              onClick={handleLeaveOnlineGame}
+              className="bg-gradient-to-r from-red-600 to-red-800 hover:from-red-700 hover:to-red-900 text-white px-6 py-3 rounded-xl text-lg font-bold shadow-lg hover:shadow-2xl transform hover:scale-110 active:scale-95 transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-red-400"
+            >
+              👋 Salir
+            </button>
+          </>
+        )}
+        
+        {waitingForOpponentRestart && !opponentWantsRestart && (
+          <div className="flex flex-col sm:flex-row gap-3 items-center">
+            <div className="bg-amber-500/20 px-6 py-3 rounded-xl text-amber-900 font-bold animate-pulse">
+              ⏳ Esperando respuesta del rival...
+            </div>
+            <button
+              onClick={handleCancelRestart}
+              className="bg-gradient-to-r from-gray-600 to-gray-800 hover:from-gray-700 hover:to-gray-900 text-white px-6 py-3 rounded-xl text-base font-bold shadow-lg hover:shadow-2xl transform hover:scale-110 active:scale-95 transition-all duration-200"
+            >
+              ❌ Cancelar
+            </button>
+          </div>
+        )}
+
+        {opponentWantsRestart && !waitingForOpponentRestart && (
+          <div className="flex flex-col sm:flex-row gap-3 items-center">
+            <div className="bg-green-500/20 px-6 py-3 rounded-xl text-green-900 font-bold">
+              🎮 El rival quiere jugar otra vez
+            </div>
+            <button
+              onClick={handleRequestRestart}
+              className="bg-gradient-to-r from-green-600 to-green-800 hover:from-green-700 hover:to-green-900 text-white px-6 py-3 rounded-xl text-lg font-bold shadow-lg hover:shadow-2xl transform hover:scale-110 active:scale-95 transition-all duration-200"
+            >
+              ✅ Aceptar
+            </button>
+            <button
+              onClick={handleLeaveOnlineGame}
+              className="bg-gradient-to-r from-red-600 to-red-800 hover:from-red-700 hover:to-red-900 text-white px-6 py-3 rounded-xl text-base font-bold shadow-lg hover:shadow-2xl transform hover:scale-110 active:scale-95 transition-all duration-200"
+            >
+              👋 Rechazar y salir
+            </button>
+          </div>
+        )}
+
+        {waitingForOpponentRestart && opponentWantsRestart && (
+          <div className="bg-purple-500/20 px-6 py-3 rounded-xl text-purple-900 font-bold animate-pulse">
+            🎉 ¡Ambos aceptaron! Reiniciando partida...
+          </div>
+        )}
+      </div>
     )}
   </div>
 );

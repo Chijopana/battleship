@@ -39,6 +39,8 @@ const OnlineMode = ({
   setGameOver,
   setOpponentGrid,
   updateOpponentGrid,
+  setWaitingForOpponentRestart,
+  setOpponentWantsRestart,
 }) => {
   const [gameId, setGameId] = useState('');
   const [status, setStatus] = useState('Modo local');
@@ -279,6 +281,32 @@ const OnlineMode = ({
       // Este evento se emite cuando se reconecta después de un cambio de red
     };
 
+    const onOpponentRequestsRestart = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] opponentRequestsRestart - El rival quiere reiniciar');
+      setOpponentWantsRestart?.(true);
+      setStatus('🎮 El rival quiere jugar otra vez');
+    };
+
+    const onOpponentCancelledRestart = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] opponentCancelledRestart - El rival canceló el reinicio');
+      setOpponentWantsRestart?.(false);
+      setWaitingForOpponentRestart?.(false);
+      setMessage?.('❌ El rival canceló el reinicio');
+    };
+
+    const onGameRestarted = () => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] gameRestarted - ¡Partida reiniciada!');
+      setWaitingForOpponentRestart?.(false);
+      setOpponentWantsRestart?.(false);
+      setMessage?.('🎉 ¡Partida reiniciada! Nueva ronda');
+      
+      // Reiniciar el juego localmente
+      startGame?.();
+    };
+
     s.on('playerJoined', onPlayerJoined);
     s.on('gameStarted', onGameStarted);
     s.on('beginTurn', onBeginTurn);
@@ -288,6 +316,9 @@ const OnlineMode = ({
     s.on('opponentLeft', onOpponentLeft);
     s.on('opponentDisconnected', onOpponentDisconnected);
     s.on('opponentReconnected', onOpponentReconnected);
+    s.on('opponentRequestsRestart', onOpponentRequestsRestart);
+    s.on('opponentCancelledRestart', onOpponentCancelledRestart);
+    s.on('gameRestarted', onGameRestarted);
     s.on('gameOver', onGameOver);
 
     return () => {
@@ -296,13 +327,17 @@ const OnlineMode = ({
       s.off('beginTurn', onBeginTurn);
       s.off('incomingShot', onIncomingShot);
       s.off('shotFeedback', onShotFeedback);
+      s.off('gameState', onGameState);
       s.off('opponentLeft', onOpponentLeft);
       s.off('opponentDisconnected', onOpponentDisconnected);
       s.off('opponentReconnected', onOpponentReconnected);
+      s.off('opponentRequestsRestart', onOpponentRequestsRestart);
+      s.off('opponentCancelledRestart', onOpponentCancelledRestart);
+      s.off('gameRestarted', onGameRestarted);
       s.off('gameOver', onGameOver);
       listenersSetupRef.current = false;
     };
-  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame, cleanupPreviousGame]);
+  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame, cleanupPreviousGame, setWaitingForOpponentRestart, setOpponentWantsRestart]);
 
   /* ======================
      🛠️ Funciones de juego

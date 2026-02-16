@@ -101,6 +101,7 @@ const makeGameIfNotExists = (id) => {
       disconnected: {},     // {playerId: {ts, sessionId, gracePeriodTimer}}
       gameOver: false,
       winner: null,
+      restartRequests: {},  // {playerId: true} para rastrear quién quiere reiniciar
     });
   }
   return games.get(id);
@@ -388,21 +389,78 @@ io.on('connection', (socket) => {
     } catch (err) { console.error('[ERROR] shotResult:', err); cb?.({ error: 'Error interno' }); }
   });
 
-  // -------- RESTART GAME --------
-  socket.on('restartGame', (gameIdRaw, cb) => {
+  // -------- REQUEST RESTART (Solicitar reiniciar) --------
+  socket.on('requestRestart', (gameIdRaw, cb) => {
     try {
       const gameId = gameIdRaw?.trim()?.toUpperCase() || inferRoom(socket);
       const game = games.get(gameId);
       if (!game) return cb?.({ error: 'Partida no encontrada' });
+      
+      // Validar que esté en la partida
+      if (!game.players.includes(socket.id)) {
+        return cb?.({ error: 'No estás en esta partida' });
+      }
 
-      game.boards = {};
-      game.ready = {};
-      game.turn = game.players[0] || null;
-      game.history = [];
-
-      io.to(gameId).emit('restartGame', { room: gameId });
+      // Marcar que este jugador quiere reiniciar
+      game.restartRequests[socket.id] = true;
+      console.log(`[🔄 Restart] ${socket.id.substring(0, 8)} solicita reiniciar ${gameId}`);
+      
+      const opponentId = game.players.find(p => p !== socket.id);
+      
+      // Notificar al rival que este jugador quiere reiniciar
+      if (opponentId) {
+        io.to(opponentId).emit('opponentRequestsRestart', { room: gameId });
+      }
+      
+      // Si ambos quieren reiniciar, reiniciar la partida
+      const allWantRestart = game.players.every(p => game.restartRequests[p]);
+      
+      if (allWantRestart && game.players.length === 2) {
+        console.log(`[✅ Restart] Ambos aceptaron, reiniciando ${gameId}`);
+        
+        // Limpiar estado del juego pero mantener jugadores
+        game.boards = {};
+        game.ready = {};
+        game.turn = game.players[0] || null;
+        game.history = [];
+        game.eventBuffer = [];
+        game.gameOver = false;
+        game.winner = null;
+        game.restartRequests = {};
+        
+        // Notificar a ambos que se reinicia
+        io.to(gameId).emit('gameRestarted', { room: gameId });
+        cb?.({ success: true, restarted: true });
+      } else {
+        cb?.({ success: true, waiting: true });
+      }
+    } catch (err) { 
+      console.error('[ERROR] requestRestart:', err); 
+      cb?.({ error: 'Error interno' }); 
+    }
+  });
+  
+  // -------- CANCEL RESTART (Cancelar reinicio) --------
+  socket.on('cancelRestart', (gameIdRaw, cb) => {
+    try {
+      const gameId = gameIdRaw?.trim()?.toUpperCase() || inferRoom(socket);
+      const game = games.get(gameId);
+      if (!game) return cb?.({ success: true });
+      
+      // Limpiar solicitudes de reinicio
+      game.restartRequests = {};
+      
+      const opponentId = game.players.find(p => p !== socket.id);
+      if (opponentId) {
+        io.to(opponentId).emit('opponentCancelledRestart', { room: gameId });
+      }
+      
       cb?.({ success: true });
-    } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
+      console.log(`[❌ Restart] ${socket.id.substring(0, 8)} canceló reinicio en ${gameId}`);
+    } catch (err) {
+      console.error('[ERROR] cancelRestart:', err);
+      cb?.({ error: 'Error interno' });
+    }
   });
 
   // -------- LEAVE GAME (Salida voluntaria) --------
