@@ -1,9 +1,10 @@
 [build]
-  command = "cd frontend && npm install --include=dev && npm run build"
+  command = "cd frontend && npm install --save-dev --production=false && npm run build"
   publish = "frontend/dist"
 
 [build.environment]
   NODE_VERSION = "20"
+  CI = "true"
 
 [[redirects]]
   from = "/*"
