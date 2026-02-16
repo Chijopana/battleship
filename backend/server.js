@@ -237,9 +237,11 @@ io.on('connection', (socket) => {
         game.turn = null;
         scheduleCleanupIfEmpty(gameId);
       } else {
-        game.turn = attackerId;
-        io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer: attackerId });
-        io.to(socket.id).emit('beginTurn', { room: gameId, currentPlayer: attackerId });
+        // Cambiar turno al defensor
+        const nextPlayer = socket.id;
+        game.turn = nextPlayer;
+        io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer });
+        io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: nextPlayer });
       }
       cb?.({ success: true });
     } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
