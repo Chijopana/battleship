@@ -5,8 +5,40 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 
+// Configurar CORS para Socket.IO
+const corsOptions = {
+  origin: function(origin, callback) {
+    // Lista de orígenes permitidos
+    const allowedOrigins = [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:3000',
+      'https://battleship-bx9q.onrender.com',
+      'https://battleship-seven-gray.netlify.app',
+    ];
+    
+    // En producción (Render), permitir cualquier origin que venga
+    if (process.env.NODE_ENV === 'production') {
+      callback(null, true);
+    } else if (!origin || allowedOrigins.includes(origin)) {
+      // En desarrollo, verificar contra la lista
+      callback(null, true);
+    } else {
+      console.warn(`[CORS] Origin bloqueado: ${origin}`);
+    }
+  },
+  methods: ['GET', 'POST'],
+  credentials: true,
+  allowEIO3: true
+};
+
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: corsOptions,
+  transports: ['websocket', 'polling'],
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  maxHttpBufferSize: 1e6,
 });
 
 const PORT = process.env.PORT || 3001;
