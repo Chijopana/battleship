@@ -217,9 +217,26 @@ const OnlineMode = ({
 
     const onOpponentLeft = () => {
       if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentLeft');
-      setIsOnline?.(false);
-      startGame?.();
+      console.log('[GameEvent] opponentLeft - El rival abandonó la partida');
+      
+      // Limpiar timers de gracia
+      if (gracePeriodTimerRef.current) {
+        clearInterval(gracePeriodTimerRef.current);
+        gracePeriodTimerRef.current = null;
+      }
+      setGracePeriodRemaining(0);
+      
+      // Mostrar mensaje y volver a modo local
+      setMessage?.('👋 El rival abandonó la partida');
+      setStatus('🔌 Rival desconectado - Volviendo a modo local...');
+      
+      // Volver a modo local después de 2 segundos
+      setTimeout(() => {
+        cleanupPreviousGame();
+        setIsOnline?.(false);
+        setStatus('Modo local');
+        startGame?.();
+      }, 2000);
     };
 
     const onOpponentDisconnected = ({ grace }) => {
@@ -285,14 +302,47 @@ const OnlineMode = ({
       s.off('gameOver', onGameOver);
       listenersSetupRef.current = false;
     };
-  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame]);
+  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, startGame, cleanupPreviousGame]);
 
   /* ======================
      🛠️ Funciones de juego
   ====================== */
+  
+  // Función para limpiar la partida anterior antes de unirse a una nueva
+  const cleanupPreviousGame = useCallback(() => {
+    const s = socketRef.current;
+    const previousGameId = gameIdRef.current;
+    
+    if (previousGameId && s && s.connected) {
+      console.log('[Cleanup] Saliendo de partida anterior:', previousGameId);
+      s.emit('leaveGame', previousGameId, (res) => {
+        console.log('[Cleanup] Resultado leaveGame:', res);
+      });
+    }
+    
+    // Resetear estado local
+    gameIdRef.current = '';
+    setGameId('');
+    listenersSetupRef.current = false;
+    setIsHost(false);
+    setGracePeriodRemaining(0);
+    if (gracePeriodTimerRef.current) {
+      clearInterval(gracePeriodTimerRef.current);
+      gracePeriodTimerRef.current = null;
+    }
+    
+    // Limpiar localStorage para evitar reconexiones fantasma
+    localStorage.removeItem('battleship_sessionId');
+    localStorage.removeItem('battleship_gameId');
+  }, []);
+
   const createGame = useCallback(() => {
     const s = socketRef.current;
     if (!s || !s.connected) { setStatus('❌ No conectado'); return; }
+    
+    // Limpiar partida anterior ANTES de crear nueva
+    cleanupPreviousGame();
+    
     const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
     setIsConnecting(true);
     setIsHost(true);
@@ -324,7 +374,7 @@ const OnlineMode = ({
         s.emit('sendBoard', { gameId: newId, board: playerGrid });
       }, 100);
     });
-  }, [setIsOnline, startGame, playerGrid]);
+  }, [setIsOnline, startGame, playerGrid, cleanupPreviousGame]);
 
   const joinGame = useCallback(() => {
     const s = socketRef.current;
@@ -335,6 +385,9 @@ const OnlineMode = ({
     if (!/^[A-Z0-9_-]{1,32}$/i.test(gameId.trim())) {
       return setStatus('❌ ID inválido (solo letras, números, _, -)');
     }
+    
+    // Limpiar partida anterior ANTES de unirse a nueva
+    cleanupPreviousGame();
     
     setIsConnecting(true);
     const upperGameId = gameId.toUpperCase();
@@ -365,7 +418,7 @@ const OnlineMode = ({
         s.emit('sendBoard', { gameId: upperGameId, board: playerGrid });
       }, 100);
     });
-  }, [gameId, playerGrid, setIsOnline, startGame]);
+  }, [gameId, playerGrid, setIsOnline, startGame, cleanupPreviousGame]);
 
   const copyGameId = useCallback(async () => {
     if (!gameId) return;
@@ -382,23 +435,19 @@ const OnlineMode = ({
     const s = socketRef.current;
     if (!toOnline) {
       if (!window.confirm('¿Volver a modo local y abandonar la partida?')) return;
-      // Salir sin notificar al rival
-      if (isOnline && s && gameIdRef.current) {
-        s.emit('leaveGame', gameIdRef.current);
-      }
+      // Limpiar partida online
+      cleanupPreviousGame();
       setIsOnline?.(false);
       setStatus('Modo local');
-      gameIdRef.current = '';
-      listenersSetupRef.current = false;
       startGame?.();
       return;
     }
     if (!window.confirm('¿Cambiar a modo online y reiniciar partida?')) return;
+    // Limpiar cualquier partida anterior al cambiar a modo online
+    cleanupPreviousGame();
     setIsOnline?.(true);
     setStatus('Modo online 🌐 Conéctate o crea sala');
-    gameIdRef.current = '';
-    listenersSetupRef.current = false;
-  }, [setIsOnline, startGame, isOnline]);
+  }, [setIsOnline, startGame, isOnline, cleanupPreviousGame]);
 
   /* ======================
      🎨 UI Mejorada para móvil

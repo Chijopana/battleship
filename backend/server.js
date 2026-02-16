@@ -154,6 +154,38 @@ const emitPlayers = (gameId) => {
   io.to(gameId).emit('playerJoined', { room: gameId, players: [...game.players] });
 };
 
+const removePlayerFromAllGames = (socketId) => {
+  let removedFromGames = [];
+  for (const [gameId, game] of games.entries()) {
+    if (game.players.includes(socketId)) {
+      const opponentId = game.players.find(p => p !== socketId);
+      
+      // Remover de la partida
+      game.players = game.players.filter(p => p !== socketId);
+      delete game.boards[socketId];
+      delete game.ready[socketId];
+      delete game.disconnected[socketId];
+      delete game.playerSessions[socketId];
+      
+      if (game.turn === socketId) {
+        game.turn = opponentId || null;
+      }
+      
+      // Notificar al rival si existe
+      if (opponentId) {
+        io.to(opponentId).emit('opponentLeft', { room: gameId });
+      }
+      
+      emitPlayers(gameId);
+      scheduleCleanupIfEmpty(gameId);
+      removedFromGames.push(gameId);
+      
+      console.log(`[🚪 AutoLeave] ${socketId.substring(0, 8)} removido de ${gameId}`);
+    }
+  }
+  return removedFromGames;
+};
+
 // ----------------- SOCKET.IO -----------------
 io.on('connection', (socket) => {
   console.log(`+ Conectado: ${socket.id}`);
@@ -163,6 +195,14 @@ io.on('connection', (socket) => {
     try {
       const gameId = gameIdRaw?.trim()?.toUpperCase();
       if (!validId(gameId)) return cb?.({ error: 'gameId inválido' });
+
+      // CRÍTICO: Remover de TODAS las partidas anteriores antes de unirse a una nueva
+      const previousGames = removePlayerFromAllGames(socket.id);
+      if (previousGames.length > 0) {
+        console.log(`[⚠️ MultiGame] ${socket.id.substring(0, 8)} estaba en ${previousGames.length} partida(s), removido de: ${previousGames.join(', ')}`);
+        // Salir de las salas del socket
+        previousGames.forEach(gId => socket.leave(gId));
+      }
 
       const game = makeGameIfNotExists(gameId);
       const sessionId = socket.handshake.auth?.sessionId || null;
@@ -273,6 +313,13 @@ io.on('connection', (socket) => {
       const gameId = raw?.trim()?.toUpperCase() || inferRoom(socket);
       const game = games.get(gameId);
       if (!game) return cb?.({ error: 'Partida no encontrada' });
+      
+      // Validar que el jugador esté en la partida
+      if (!game.players.includes(socket.id)) {
+        console.warn(`[⚠️ InvalidShot] ${socket.id.substring(0, 8)} intentó disparar en ${gameId} pero no está en la partida`);
+        return cb?.({ error: 'No estás en esta partida' });
+      }
+      
       if (game.turn !== socket.id) return cb?.({ error: 'No es tu turno' });
 
       const opponentId = game.players.find(id => id !== socket.id);
@@ -301,9 +348,21 @@ io.on('connection', (socket) => {
       const gameId = raw?.trim()?.toUpperCase() || inferRoom(socket);
       const game = games.get(gameId);
       if (!game) return cb?.({ error: 'Partida no encontrada' });
+      
+      // Validar que el jugador esté en la partida
+      if (!game.players.includes(socket.id)) {
+        console.warn(`[⚠️ InvalidResult] ${socket.id.substring(0, 8)} intentó enviar resultado en ${gameId} pero no está en la partida`);
+        return cb?.({ error: 'No estás en esta partida' });
+      }
 
       const attackerId = from || game.players.find(p => p !== socket.id);
       if (!attackerId) return cb?.({ error: 'Atacante desconocido' });
+      
+      // Validar que el atacante también esté en la partida
+      if (!game.players.includes(attackerId)) {
+        console.warn(`[⚠️ InvalidResult] Atacante ${attackerId.substring(0, 8)} no está en ${gameId}`);
+        return cb?.({ error: 'Atacante no válido' });
+      }
 
       // Guardar en historial y buffer
       game.history.push({ type: 'result', player: socket.id, attacker: attackerId, result, row, col, allSunk, ts: Date.now() });
@@ -351,17 +410,35 @@ io.on('connection', (socket) => {
     try {
       const gameId = gameIdRaw?.trim()?.toUpperCase() || inferRoom(socket);
       const game = games.get(gameId);
-      if (!game) return cb?.({ error: 'Partida no encontrada' });
+      if (!game) return cb?.({ success: true }); // Si no existe, ya salió
 
       const opponentId = game.players.find(p => p !== socket.id);
+      const sessionId = game.playerSessions?.[socket.id];
+      
+      // Limpiar jugador de la partida
       game.players = game.players.filter(p => p !== socket.id);
       delete game.boards[socket.id];
       delete game.ready[socket.id];
-      if (game.turn === socket.id) game.turn = game.players[0] || null;
+      delete game.disconnected[socket.id];
+      delete game.playerSessions[socket.id];
+      
+      // Limpiar sessionMap
+      if (sessionId && sessionMap.has(sessionId)) {
+        sessionMap.delete(sessionId);
+      }
+      
+      if (game.turn === socket.id) {
+        game.turn = opponentId || null;
+      }
 
+      // Notificar al rival
       if (opponentId) {
         io.to(opponentId).emit('opponentLeft', { room: gameId });
+        if (game.turn === opponentId && !game.gameOver) {
+          io.to(opponentId).emit('beginTurn', { room: gameId, currentPlayer: opponentId });
+        }
       }
+      
       emitPlayers(gameId);
       scheduleCleanupIfEmpty(gameId);
       
