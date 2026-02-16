@@ -9,13 +9,19 @@ const SERVER_URL =
 function getOrCreateSocket() {
   if (typeof window === 'undefined') return null;
   if (!window.__BATTLESHIP_SOCKET__) {
+    // Recuperar sessionId guardado
+    const savedSessionId = localStorage.getItem('battleship_sessionId');
+    
     window.__BATTLESHIP_SOCKET__ = io(SERVER_URL, {
       autoConnect: false,
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 15,           // Más intentos
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
+      reconnectionDelayMax: 10000,        // Máximo 10s entre intentos
+      auth: {
+        sessionId: savedSessionId || undefined
+      }
     });
   }
   return window.__BATTLESHIP_SOCKET__;
@@ -40,12 +46,15 @@ const OnlineMode = ({
   const [isHost, setIsHost] = useState(false);
   const [playerId, setPlayerId] = useState(null);
   const [socketReady, setSocketReady] = useState(false);
+  const [isTemporarilyDisconnected, setIsTemporarilyDisconnected] = useState(false);
+  const [gracePeriodRemaining, setGracePeriodRemaining] = useState(0);
 
   const socketRef = useRef(null);
   const mountedRef = useRef(true);
   const gameIdRef = useRef('');
   const listenersSetupRef = useRef(false);
   const lastShotTimeRef = useRef(0);
+  const gracePeriodTimerRef = useRef(null);
 
   /* ========================
      🧠 Conexión Socket
@@ -61,6 +70,7 @@ const OnlineMode = ({
     const onConnect = () => {
       if (!mountedRef.current) return;
       setSocketReady(true);
+      setIsTemporarilyDisconnected(false);
       setPlayerId(s.id);
       setSocketInstance?.(s);
       setStatus('✅ Conectado al servidor');
@@ -69,7 +79,7 @@ const OnlineMode = ({
 
     const onConnectError = (err) => {
       if (!mountedRef.current) return;
-      setStatus('❌ No se pudo conectar');
+      setStatus('❌ Error de conexión, reintentando...');
       setSocketReady(false);
       console.error('[Socket] Error de conexión:', err);
     };
@@ -77,11 +87,16 @@ const OnlineMode = ({
     const onReconnect = () => {
       if (!mountedRef.current) return;
       setSocketReady(true);
+      setIsTemporarilyDisconnected(false);
       setStatus('✅ Reconectado');
+      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
       if (gameIdRef.current) {
         s.emit('joinGame', gameIdRef.current, (res) => {
-          if (res?.error) setStatus('❌ ' + res.error);
-          else setStatus('✅ Vuelto a unir a la sala');
+          if (res?.error) {
+            setStatus('❌ ' + res.error);
+          } else if (res?.reconnect) {
+            setStatus('✅ Reconectado a la partida');
+          }
         });
       }
     };
@@ -89,8 +104,16 @@ const OnlineMode = ({
     const onDisconnect = (reason) => {
       if (!mountedRef.current) return;
       setSocketReady(false);
-      setStatus(`⚠️ Desconectado: ${reason}`);
-      console.warn('[Socket] Desconectado:', reason);
+      
+      // Diferenciar entre desconexión temporal (cambio de red) y permanente
+      if (reason === 'transport close' || reason === 'transport error') {
+        setIsTemporarilyDisconnected(true);
+        setStatus('⚠️ Conexión perdida, reconectando...');
+        console.warn('[Socket] Desconexión temporal:', reason);
+      } else {
+        setStatus(`⚠️ Desconectado: ${reason}`);
+        console.warn('[Socket] Desconectado:', reason);
+      }
     };
 
     s.on('connect', onConnect);
@@ -199,14 +222,44 @@ const OnlineMode = ({
       startGame?.();
     };
 
-    const onOpponentDisconnected = () => {
+    const onOpponentDisconnected = ({ grace }) => {
       if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentDisconnected');
+      console.log('[GameEvent] opponentDisconnected - Grace period:', grace, 'segundos');
+      setStatus(`⚠️ Rival desconectado (esperando ${grace}s)`);
+      
+      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
+      let remaining = grace;
+      setGracePeriodRemaining(remaining);
+      
+      gracePeriodTimerRef.current = setInterval(() => {
+        remaining--;
+        setGracePeriodRemaining(remaining);
+        if (remaining <= 0) {
+          clearInterval(gracePeriodTimerRef.current);
+          setStatus('😵 El rival se ha ido');
+        }
+      }, 1000);
     };
 
     const onOpponentReconnected = () => {
       if (!mountedRef.current) return;
       console.log('[GameEvent] opponentReconnected');
+      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
+      setStatus('✅ Rival reconectado');
+      setGracePeriodRemaining(0);
+    };
+
+    const onGameState = ({ sessionId, playerId, ...state }) => {
+      if (!mountedRef.current) return;
+      console.log('[GameEvent] gameState - Sincronizando estado después de reconexión');
+      
+      // Guardar sessionId en localStorage para futuras reconexiones
+      if (sessionId) {
+        localStorage.setItem('battleship_sessionId', sessionId);
+      }
+      
+      // Aquí el frontend puede sincronizar el estado del juego
+      // Este evento se emite cuando se reconecta después de un cambio de red
     };
 
     s.on('playerJoined', onPlayerJoined);
@@ -214,6 +267,7 @@ const OnlineMode = ({
     s.on('beginTurn', onBeginTurn);
     s.on('incomingShot', onIncomingShot);
     s.on('shotFeedback', onShotFeedback);
+    s.on('gameState', onGameState);
     s.on('opponentLeft', onOpponentLeft);
     s.on('opponentDisconnected', onOpponentDisconnected);
     s.on('opponentReconnected', onOpponentReconnected);
@@ -238,7 +292,7 @@ const OnlineMode = ({
   ====================== */
   const createGame = useCallback(() => {
     const s = socketRef.current;
-    if (!s || !s.connected) { setStatus('No conectado'); return; }
+    if (!s || !s.connected) { setStatus('❌ No conectado'); return; }
     const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
     setIsConnecting(true);
     setIsHost(true);
@@ -250,11 +304,21 @@ const OnlineMode = ({
         console.error('[Error] Error al crear sala:', res.error);
         return setStatus('❌ ' + res.error);
       }
+      
+      // Guardar sessionId y gameId para reconexiones
+      if (res?.sessionId) {
+        localStorage.setItem('battleship_sessionId', res.sessionId);
+      }
+      if (res?.gameId) {
+        localStorage.setItem('battleship_gameId', res.gameId);
+      }
+      
       setGameId(newId);
       gameIdRef.current = newId;
       setStatus(`Sala creada: ${newId} 🧭 Esperando rival...`);
       setIsOnline?.(true);
       startGame?.();
+      
       // Enviar tablero después de entrar a la sala
       setTimeout(() => {
         s.emit('sendBoard', { gameId: newId, board: playerGrid });
@@ -282,10 +346,20 @@ const OnlineMode = ({
         console.error('[Error] Error al unirse:', res.error);
         return setStatus('❌ ' + res.error);
       }
+      
+      // Guardar sessionId y gameId para reconexiones
+      if (res?.sessionId) {
+        localStorage.setItem('battleship_sessionId', res.sessionId);
+      }
+      if (res?.gameId) {
+        localStorage.setItem('battleship_gameId', res.gameId);
+      }
+      
       gameIdRef.current = upperGameId;
       setStatus(`Unido a sala ${upperGameId} ✨`);
       setIsOnline?.(true);
       startGame?.();
+      
       // Enviar tablero después de entrar a la sala
       setTimeout(() => {
         s.emit('sendBoard', { gameId: upperGameId, board: playerGrid });
@@ -383,7 +457,17 @@ const OnlineMode = ({
             </button>
           </div>
           <div className="text-center text-sm sm:text-base mt-1 font-medium text-gray-700">
-            {isConnecting ? '⏳ Conectando...' : status}
+            {isConnecting ? '⏳ Conectando...' : (
+              <>
+                {status}
+                {isTemporarilyDisconnected && (
+                  <div className="text-amber-600 font-bold">⚠️ Reconectando...</div>
+                )}
+                {gracePeriodRemaining > 0 && (
+                  <div className="text-red-600 font-bold">⏱️ {gracePeriodRemaining}s para reconectar</div>
+                )}
+              </>
+            )}
           </div>
           <div className="text-center text-xs text-gray-600 mt-1">
             🔗 Servidor: {SERVER_URL.split('//')[1]?.split('/')[0] || SERVER_URL}

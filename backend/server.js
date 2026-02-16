@@ -36,8 +36,9 @@ const corsOptions = {
 const io = new Server(server, {
   cors: corsOptions,
   transports: ['websocket', 'polling'],
-  pingInterval: 25000,
-  pingTimeout: 60000,
+  pingInterval: 15000,        // Ping más frecuente (15s)
+  pingTimeout: 120000,         // Timeout más largo (2 min)
+  maxDisconnectionDuration: 5 * 60 * 1000,  // 5 min para reconectarse
   maxHttpBufferSize: 1e6,
 });
 
@@ -77,30 +78,58 @@ setInterval(() => {
 
 // --------------------- PARTIDAS ---------------------
 const games = new Map();
-const GAME_TTL_MS = 1000 * 60 * 10; // 10 minutos
+const sessionMap = new Map(); // Mapea sessionId -> {gameId, playerId, socketIds: []}
+const GAME_TTL_MS = 1000 * 60 * 30; // 30 minutos
+const DISCONNECTION_GRACE_PERIOD = 5 * 60 * 1000; // 5 minutos para reconectarse
+const MAX_EVENT_BUFFER = 50; // Máximo de eventos a guardar
 
 // ----------------- HELPERS -----------------
 const validId = (id) => typeof id === 'string' && /^[A-Z0-9_-]{1,32}$/i.test(id.trim());
+
 const makeGameIfNotExists = (id) => {
   if (!games.has(id)) {
     games.set(id, {
       players: [],
+      playerSessions: {}, // {playerId: sessionId}
       boards: {},
       ready: {},
       turn: null,
       createdAt: Date.now(),
       ttlTimer: null,
-      history: [], // Guardar movimientos
-      disconnected: {}, // Para reconexión
+      history: [],
+      eventBuffer: [],      // Buffer de eventos para reconexiones
+      disconnected: {},     // {playerId: {ts, sessionId, gracePeriodTimer}}
+      gameOver: false,
+      winner: null,
     });
   }
   return games.get(id);
 };
 
+const addEventToBuffer = (game, event) => {
+  game.eventBuffer.push({ ...event, ts: Date.now() });
+  if (game.eventBuffer.length > MAX_EVENT_BUFFER) {
+    game.eventBuffer.shift();
+  }
+};
+
 const scheduleCleanupIfEmpty = (id) => {
   const g = games.get(id);
   if (!g) return;
-  if (!g.players.length) {
+  
+  const hasActivePlayers = g.players.length > 0;
+  const hasDisconnectedPlayers = Object.keys(g.disconnected).length > 0;
+  
+  // Si hay desconectados en periodo de gracia, no limpiar
+  const now = Date.now();
+  for (const [pId, disc] of Object.entries(g.disconnected)) {
+    if (now - disc.ts < DISCONNECTION_GRACE_PERIOD) {
+      hasDisconnectedPlayers = true;
+      break;
+    }
+  }
+  
+  if (!hasActivePlayers && !hasDisconnectedPlayers) {
     if (g.ttlTimer) clearTimeout(g.ttlTimer);
     g.ttlTimer = setTimeout(() => {
       if (games.get(id)?.players.length === 0) {
@@ -108,9 +137,6 @@ const scheduleCleanupIfEmpty = (id) => {
         console.log(`[🧹 Cleanup] Sala ${id} eliminada por inactividad`);
       }
     }, GAME_TTL_MS);
-  } else if (g.ttlTimer) {
-    clearTimeout(g.ttlTimer);
-    g.ttlTimer = null;
   }
 };
 
@@ -139,31 +165,79 @@ io.on('connection', (socket) => {
       if (!validId(gameId)) return cb?.({ error: 'gameId inválido' });
 
       const game = makeGameIfNotExists(gameId);
+      const sessionId = socket.handshake.auth?.sessionId || null;
 
-      // Reconexion
-      if (game.disconnected[socket.id]) {
-        game.players.push(socket.id);
-        delete game.disconnected[socket.id];
-        socket.join(gameId);
-        const opponentId = game.players.find(p => p !== socket.id);
-        if (opponentId) io.to(opponentId).emit('opponentReconnected', { room: gameId });
-        emitPlayers(gameId);
-        return cb?.({ success: true, reconnect: true, gameId, playerId: socket.id });
+      console.log(`[🎮 Join] ${socket.id.substring(0, 8)} a sala ${gameId} (session: ${sessionId?.substring(0, 8) || 'NEW'})`);
+
+      // Caso 1: Reconexión - mismo sessionId
+      if (sessionId && sessionMap.has(sessionId)) {
+        const sess = sessionMap.get(sessionId);
+        if (sess.gameId === gameId) {
+          const playerId = sess.playerId;
+          
+          // Agregar nuevo socket a la sesión
+          if (!sess.socketIds.includes(socket.id)) sess.socketIds.push(socket.id);
+          
+          // Restaurar en el juego
+          if (!game.players.includes(playerId)) game.players.push(playerId);
+          socket.join(gameId);
+          delete game.disconnected[playerId];
+          
+          const opponentId = game.players.find(p => p !== playerId);
+          
+          // Notificar reconexión
+          if (opponentId) io.to(opponentId).emit('opponentReconnected', { room: gameId });
+          
+          // Enviar estado del juego y buffer de eventos
+          socket.emit('gameState', {
+            gameId,
+            playerId,
+            sessionId,
+            players: game.players,
+            boards: game.boards,
+            turn: game.turn,
+            gameOver: game.gameOver,
+            winner: game.winner,
+            history: game.history.slice(-20), // Últimos 20 eventos
+            eventBuffer: game.eventBuffer,
+          });
+          
+          emitPlayers(gameId);
+          return cb?.({ success: true, reconnect: true, gameId, playerId, sessionId });
+        }
       }
 
-      if (game.players.includes(socket.id)) return cb?.({ error: 'Ya estás en la partida' });
+      // Caso 2: Nuevo jugador
       if (game.players.length >= 2) return cb?.({ error: 'Partida llena' });
+      if (game.gameOver) return cb?.({ error: 'Partida ya terminada' });
 
-      game.players.push(socket.id);
+      const newSessionId = `sess_${socket.id}_${Date.now()}`;
+      const playerId = socket.id;
+      
+      game.players.push(playerId);
+      game.playerSessions[playerId] = newSessionId;
       socket.join(gameId);
+      
+      sessionMap.set(newSessionId, {
+        gameId,
+        playerId,
+        socketIds: [socket.id],
+        createdAt: Date.now(),
+      });
+
       if (!game.turn) game.turn = game.players[0];
       scheduleCleanupIfEmpty(gameId);
 
-      cb?.({ success: true, gameId, playerId: socket.id });
+      cb?.({ success: true, gameId, playerId, sessionId: newSessionId });
       emitPlayers(gameId);
 
-      if (game.players.length === 2) io.to(gameId).emit('startGame', { room: gameId, message: '¡Partida lista!' });
-    } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
+      if (game.players.length === 2) {
+        io.to(gameId).emit('gameStarted', { room: gameId, message: '¡Partida lista!' });
+      }
+    } catch (err) { 
+      console.error('[ERROR] joinGame:', err); 
+      cb?.({ error: 'Error interno' }); 
+    }
   });
 
   // -------- SEND BOARD --------
@@ -175,6 +249,7 @@ io.on('connection', (socket) => {
 
       game.boards[socket.id] = board;
       game.ready[socket.id] = true;
+      addEventToBuffer(game, { type: 'boardReady', playerId: socket.id });
       cb?.({ success: true });
 
       // Si ambos están listos, comienza el juego
@@ -182,8 +257,9 @@ io.on('connection', (socket) => {
         const startedPlayer = game.turn || game.players[0];
         io.to(gameId).emit('gameStarted', { room: gameId, startedBy: startedPlayer });
         io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: startedPlayer });
+        addEventToBuffer(game, { type: 'gameStarted', startedBy: startedPlayer });
       }
-    } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
+    } catch (err) { console.error('[ERROR] sendBoard:', err); cb?.({ error: 'Error interno' }); }
   });
 
   // -------- PLAYER SHOT --------
@@ -207,8 +283,9 @@ io.on('connection', (socket) => {
         return cb?.({ error: 'Coordenadas inválidas' });
       }
 
-      // Guardar en historial
+      // Guardar en historial y buffer
       game.history.push({ type: 'shot', player: socket.id, row, col, ts: Date.now() });
+      addEventToBuffer(game, { type: 'shot', from: socket.id, row, col });
 
       io.to(opponentId).emit('incomingShot', { room: gameId, row, col, from: socket.id });
       cb?.({ success: true });
@@ -228,13 +305,17 @@ io.on('connection', (socket) => {
       const attackerId = from || game.players.find(p => p !== socket.id);
       if (!attackerId) return cb?.({ error: 'Atacante desconocido' });
 
-      // Guardar en historial
+      // Guardar en historial y buffer
       game.history.push({ type: 'result', player: socket.id, attacker: attackerId, result, row, col, allSunk, ts: Date.now() });
+      addEventToBuffer(game, { type: 'shotResult', from: attackerId, result, row, col, allSunk });
 
       if (allSunk) {
+        game.gameOver = true;
+        game.winner = attackerId;
         io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer: null });
         io.to(gameId).emit('gameOver', { room: gameId, winner: attackerId, loser: socket.id });
         game.turn = null;
+        addEventToBuffer(game, { type: 'gameOver', winner: attackerId, loser: socket.id });
         scheduleCleanupIfEmpty(gameId);
       } else {
         // Cambiar turno al defensor
@@ -242,9 +323,10 @@ io.on('connection', (socket) => {
         game.turn = nextPlayer;
         io.to(attackerId).emit('shotFeedback', { room: gameId, result, row, col, allSunk, nextPlayer });
         io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: nextPlayer });
+        addEventToBuffer(game, { type: 'turnChanged', turn: nextPlayer });
       }
       cb?.({ success: true });
-    } catch (err) { console.error(err); cb?.({ error: 'Error interno' }); }
+    } catch (err) { console.error('[ERROR] shotResult:', err); cb?.({ error: 'Error interno' }); }
   });
 
   // -------- RESTART GAME --------
@@ -292,23 +374,59 @@ io.on('connection', (socket) => {
   // -------- DISCONNECT --------
   socket.on('disconnect', () => {
     console.log(`- Desconectado: ${socket.id}`);
+    
     for (const [gameId, game] of games.entries()) {
-      if (!game.players.includes(socket.id)) continue;
+      const playerId = socket.id;
+      if (!game.players.includes(playerId)) continue;
 
-      const opponentId = game.players.find(p => p !== socket.id);
-      game.players = game.players.filter(p => p !== socket.id);
-      delete game.boards[socket.id];
-      delete game.ready[socket.id];
-      if (game.turn === socket.id) game.turn = game.players[0] || null;
+      const opponentId = game.players.find(p => p !== playerId);
+      const sessionId = game.playerSessions[playerId];
 
-      // Guardar para reconexion
-      game.disconnected[socket.id] = Date.now();
-
-      if (opponentId) {
-        io.to(opponentId).emit('opponentDisconnected', { room: gameId });
+      // Remover socket de la sesión pero mantener la sesión activa
+      if (sessionId && sessionMap.has(sessionId)) {
+        const sess = sessionMap.get(sessionId);
+        sess.socketIds = sess.socketIds.filter(id => id !== socket.id);
       }
-      emitPlayers(gameId);
+
+      // Mantener el jugador en la partida pero marcar como desconectado
+      game.disconnected[playerId] = {
+        ts: Date.now(),
+        sessionId,
+      };
+
+      // Establecer período de gracia para reconexión
+      const gracePeriodTimer = setTimeout(() => {
+        const disc = game.disconnected[playerId];
+        if (disc && Date.now() - disc.ts >= DISCONNECTION_GRACE_PERIOD) {
+          // Considerado como abandono
+          game.players = game.players.filter(p => p !== playerId);
+          delete game.boards[playerId];
+          delete game.ready[playerId];
+          delete game.disconnected[playerId];
+          
+          if (game.turn === playerId && !game.gameOver) {
+            game.turn = opponentId || null;
+            if (opponentId) {
+              io.to(opponentId).emit('opponentLeft', { room: gameId });
+              io.to(gameId).emit('beginTurn', { room: gameId, currentPlayer: opponentId });
+            }
+          }
+          
+          emitPlayers(gameId);
+          scheduleCleanupIfEmpty(gameId);
+          console.log(`[👋 Grace End] ${playerId.substring(0, 8)} se fue de ${gameId} (grace period expiró)`);
+        }
+      }, DISCONNECTION_GRACE_PERIOD);
+
+      game.disconnected[playerId].gracePeriodTimer = gracePeriodTimer;
+
+      // Notificar al rival
+      if (opponentId) {
+        io.to(opponentId).emit('opponentDisconnected', { room: gameId, grace: DISCONNECTION_GRACE_PERIOD / 1000 });
+      }
+
       scheduleCleanupIfEmpty(gameId);
+      console.log(`[⚠️ Grace] ${playerId.substring(0, 8)} desconectado de ${gameId} (período de gracia: ${DISCONNECTION_GRACE_PERIOD / 1000}s)`);
     }
   });
 
