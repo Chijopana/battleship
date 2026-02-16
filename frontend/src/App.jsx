@@ -110,7 +110,7 @@ const App = () => {
   useEffect(() => { playerGridRef.current = playerGrid; }, [playerGrid]);
   useEffect(() => { playerShipsRef.current = playerShips; }, [playerShips]);
 
-  const startGame = () => {
+  const startGame = React.useCallback(() => {
     const player = placeShips(createEmptyBoard(), shipsConfig);
     const bot = placeShips(createEmptyBoard(), shipsConfig);
 
@@ -143,11 +143,11 @@ const App = () => {
     } else {
       setPlayerTurn(true);
     }
-  };
+  }, [mode, isOnline]);
 
   useEffect(() => { 
     startGame(); 
-  }, [mode, difficulty, isOnline]);
+  }, [startGame, mode, difficulty, isOnline]);
 
   // --- ONLINE MODE CALLBACKS ---
   const updateOpponentGrid = (row, col, resultType) => {
@@ -182,7 +182,7 @@ const App = () => {
   };
 
   // --- ONLINE RESTART FUNCTIONS ---
-  const handleRequestRestart = () => {
+  const handleRequestRestart = React.useCallback(() => {
     if (!socketInstance || !isOnline) return;
     
     playClickSound();
@@ -200,9 +200,9 @@ const App = () => {
         setMessage('⏳ Esperando que el rival acepte reiniciar...');
       }
     });
-  };
+  }, [socketInstance, isOnline, playClickSound]);
 
-  const handleCancelRestart = () => {
+  const handleCancelRestart = React.useCallback(() => {
     if (!socketInstance || !isOnline) return;
     
     playClickSound();
@@ -212,9 +212,9 @@ const App = () => {
     socketInstance.emit('cancelRestart', null, (res) => {
       console.log('[❌ Reinicio] Reinicio cancelado');
     });
-  };
+  }, [socketInstance, isOnline, playClickSound]);
 
-  const handleLeaveOnlineGame = () => {
+  const handleLeaveOnlineGame = React.useCallback(() => {
     if (!socketInstance || !isOnline) return;
     
     playClickSound();
@@ -228,7 +228,7 @@ const App = () => {
       setOpponentWantsRestart(false);
       startGame();
     });
-  };
+  }, [socketInstance, isOnline, playClickSound, startGame]);
 
   // --- HANDLE PLAYER SHOT ---
   const handlePlayerShot = (row, col) => {
