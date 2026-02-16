@@ -15,7 +15,7 @@ const corsOptions = {
       'http://127.0.0.1:5173',
       'http://127.0.0.1:3000',
       'https://battleship-bx9q.onrender.com',
-      'https://battleship-seven-gray.netlify.app',
+      'https://battleship-web-game.netlify.app',
     ];
     
     // En producción (Render), permitir cualquier origin que venga
