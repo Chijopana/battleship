@@ -1,577 +1,329 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import clsx from 'clsx';
+import { fleetPayload } from '../game/logic';
 
 const SERVER_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SOCKET_URL) ||
-  (typeof process !== 'undefined' && process.env?.REACT_APP_SOCKET_URL) ||
-  'https://battleship-bx9q.onrender.com';
+  import.meta.env.VITE_SOCKET_URL ||
+  (import.meta.env.DEV ? 'http://localhost:3001' : 'https://battleship-bx9q.onrender.com');
 
-function getOrCreateSocket() {
+const SESSION_KEY = 'battleship_sessionId';
+const GAME_KEY = 'battleship_gameId';
+
+const store = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch { /* modo privado */ } },
+  remove(key) { try { localStorage.removeItem(key); } catch { /* modo privado */ } },
+};
+
+/** Un único socket para toda la app, aunque React monte el componente dos veces. */
+function getSocket() {
   if (typeof window === 'undefined') return null;
   if (!window.__BATTLESHIP_SOCKET__) {
-    // Recuperar sessionId guardado
-    const savedSessionId = localStorage.getItem('battleship_sessionId');
-    
     window.__BATTLESHIP_SOCKET__ = io(SERVER_URL, {
       autoConnect: false,
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 15,           // Más intentos
+      reconnectionAttempts: 15,
       reconnectionDelay: 1000,
-      reconnectionDelayMax: 10000,        // Máximo 10s entre intentos
-      auth: {
-        sessionId: savedSessionId || undefined
-      }
+      reconnectionDelayMax: 10000,
+      auth: { sessionId: store.get(SESSION_KEY) || undefined },
     });
   }
   return window.__BATTLESHIP_SOCKET__;
 }
 
-const OnlineMode = ({
-  setIsOnline,
-  isOnline,
-  playerGrid,
-  startGame,
-  handleIncomingShot,
-  switchOnlineTurn,
-  setSocketInstance,
-  setMessage,
-  setGameOver,
-  setOpponentGrid,
-  updateOpponentGrid,
-  setWaitingForOpponentRestart,
-  setOpponentWantsRestart,
-}) => {
-  const [gameId, setGameId] = useState('');
-  const [status, setStatus] = useState('Modo local');
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isHost, setIsHost] = useState(false);
-  const [playerId, setPlayerId] = useState(null);
-  const [socketReady, setSocketReady] = useState(false);
-  const [isTemporarilyDisconnected, setIsTemporarilyDisconnected] = useState(false);
-  const [gracePeriodRemaining, setGracePeriodRemaining] = useState(0);
+const randomRoomId = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+
+const OnlineMode = ({ isOnline, setIsOnline, setSocketInstance, online }) => {
+  const [roomInput, setRoomInput] = useState('');
+  const [joinedRoom, setJoinedRoom] = useState('');
+  const [status, setStatus] = useState('Sin conectar');
+  const [connected, setConnected] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [opponents, setOpponents] = useState(0);
+  const [grace, setGrace] = useState(0);
+  const [copied, setCopied] = useState(false);
 
   const socketRef = useRef(null);
-  const mountedRef = useRef(true);
-  const gameIdRef = useRef('');
-  const listenersSetupRef = useRef(false);
-  const lastShotTimeRef = useRef(0);
-  const gracePeriodTimerRef = useRef(null);
-  const startGameRef = useRef(startGame);
-  const cleanupPreviousGameRef = useRef(null);
-  
-  // Mantener refs actualizadas
-  useEffect(() => {
-    startGameRef.current = startGame;
-  }, [startGame]);
+  const joinedRoomRef = useRef('');
+  const graceTimerRef = useRef(null);
 
-  /* ========================
-     🧠 Conexión Socket
-  ======================== */
+  // Los handlers cambian de identidad entre renders; guardarlos en una ref
+  // evita volver a suscribir todos los listeners del socket cada vez.
+  const handlersRef = useRef(online);
+  handlersRef.current = online;
+
+  const setRoom = useCallback((id) => {
+    joinedRoomRef.current = id;
+    setJoinedRoom(id);
+  }, []);
+
+  const stopGraceCountdown = useCallback(() => {
+    if (graceTimerRef.current) clearInterval(graceTimerRef.current);
+    graceTimerRef.current = null;
+    setGrace(0);
+  }, []);
+
+  /* ---------------- Conexión ---------------- */
   useEffect(() => {
-    mountedRef.current = true;
-    const s = getOrCreateSocket();
+    const s = getSocket();
+    if (!s) return;
     socketRef.current = s;
-    gameIdRef.current = gameId;
-    
-    if (!s) return () => { mountedRef.current = false; };
+    setSocketInstance?.(s);
 
     const onConnect = () => {
-      if (!mountedRef.current) return;
-      setSocketReady(true);
-      setIsTemporarilyDisconnected(false);
-      setPlayerId(s.id);
-      setSocketInstance?.(s);
-      setStatus('✅ Conectado al servidor');
-      console.log('[Socket] Conectado:', s.id);
-    };
-
-    const onConnectError = (err) => {
-      if (!mountedRef.current) return;
-      setStatus('❌ Error de conexión, reintentando...');
-      setSocketReady(false);
-      console.error('[Socket] Error de conexión:', err);
-    };
-
-    const onReconnect = () => {
-      if (!mountedRef.current) return;
-      setSocketReady(true);
-      setIsTemporarilyDisconnected(false);
-      setStatus('✅ Reconectado');
-      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
-      if (gameIdRef.current) {
-        s.emit('joinGame', gameIdRef.current, (res) => {
-          if (res?.error) {
-            setStatus('❌ ' + res.error);
-          } else if (res?.reconnect) {
-            setStatus('✅ Reconectado a la partida');
-          }
+      setConnected(true);
+      setStatus('Conectado al servidor');
+      // Tras reconectar, volver a entrar en la sala en la que estábamos
+      const room = joinedRoomRef.current;
+      if (room) {
+        s.emit('joinGame', room, (res) => {
+          if (res?.error) setStatus(res.error);
+          else if (res?.reconnect) setStatus(`Reconectado a ${room}`);
         });
       }
     };
-
     const onDisconnect = (reason) => {
-      if (!mountedRef.current) return;
-      setSocketReady(false);
-      
-      // Diferenciar entre desconexión temporal (cambio de red) y permanente
-      if (reason === 'transport close' || reason === 'transport error') {
-        setIsTemporarilyDisconnected(true);
-        setStatus('⚠️ Conexión perdida, reconectando...');
-        console.warn('[Socket] Desconexión temporal:', reason);
-      } else {
-        setStatus(`⚠️ Desconectado: ${reason}`);
-        console.warn('[Socket] Desconectado:', reason);
-      }
+      setConnected(false);
+      setStatus(reason === 'io client disconnect' ? 'Desconectado' : 'Conexión perdida, reintentando…');
+    };
+    const onConnectError = () => {
+      setConnected(false);
+      setStatus('No se pudo conectar. El servidor gratuito tarda ~30 s en despertar.');
     };
 
     s.on('connect', onConnect);
-    s.on('connect_error', onConnectError);
-    s.on('reconnect', onReconnect);
     s.on('disconnect', onDisconnect);
-
+    s.on('connect_error', onConnectError);
     if (!s.connected) s.connect();
 
     return () => {
-      mountedRef.current = false;
       s.off('connect', onConnect);
-      s.off('connect_error', onConnectError);
-      s.off('reconnect', onReconnect);
       s.off('disconnect', onDisconnect);
+      s.off('connect_error', onConnectError);
     };
   }, [setSocketInstance]);
 
-  /* ===============================
-     🎧 Listeners de eventos de juego
-  ================================ */
+  /* ---------------- Eventos de partida ---------------- */
+  // Los listeners se registran desde el montaje, no al entrar en la sala: el servidor
+  // puede emitir beginTurn en cuanto ambos mandan flota, y esa carrera dejaba
+  // al segundo jugador esperando un turno que ya había pasado.
   useEffect(() => {
     const s = socketRef.current;
-    if (!s || !isOnline) return;
+    if (!s) return;
 
-    // Solo configurar listeners una vez
-    if (listenersSetupRef.current) return;
-    listenersSetupRef.current = true;
-
-    console.log('[GameListeners] Configurando listeners del juego');
-
-    const onPlayerJoined = ({ players }) => {
-      if (!mountedRef.current) return;
-      const txt = players.length === 2
-        ? '👾 Rival conectado. Preparando partida...'
-        : `Jugadores en sala: ${players.length}/2`;
-      setStatus(txt);
-      console.log('[GameEvent] playerJoined - Jugadores:', players.length);
-    };
-
-    const onGameStarted = ({ startedBy }) => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] gameStarted - Iniciado por:', startedBy);
-      setMessage('🎮 ¡Partida iniciada!');
-    };
-
-    const onBeginTurn = ({ currentPlayer }) => {
-      if (!mountedRef.current) return;
-      const amI = s.id === currentPlayer;
-      switchOnlineTurn?.(amI);
-      setStatus(amI ? '🔥 Tu turno' : '⏳ Turno del rival');
-      console.log('[GameEvent] beginTurn - Tu turno:', amI, '| currentPlayer:', currentPlayer.substring(0, 8), 'Tu ID:', s.id.substring(0, 8));
-    };
-
-    const onIncomingShot = ({ row, col, from }) => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] incomingShot - Disparo en:', row, col);
-      handleIncomingShot?.(row, col, (result, allSunk) => {
-        const gId = gameIdRef.current;
-        console.log('[Response] Enviando shotResult -', { result, row, col, allSunk, gameId: gId });
-        s.emit('shotResult', { gameId: gId, result, row, col, from, allSunk });
+    /** Reparte flota nueva y la envía al servidor. */
+    const sendFleet = (room) => {
+      const ships = handlersRef.current.startGame(true);
+      s.emit('sendBoard', { gameId: room, ships: fleetPayload(ships) }, (res) => {
+        if (res?.error) handlersRef.current.say(res.error, 'bad');
       });
     };
 
-    const onShotFeedback = ({ result, row, col, nextPlayer, allSunk }) => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] shotFeedback - Resultado:', result, '| nextPlayer:', nextPlayer?.substring(0, 8));
-      
-      setOpponentGrid(prev => {
-        if (!prev) return prev;
-        const newGrid = prev.map(r => r.map(c => ({ ...c })));
-        if (newGrid[row] && newGrid[row][col]) {
-          newGrid[row][col].hit = true;
-          newGrid[row][col].type = result;
+    const listeners = {
+      playerJoined: ({ players }) => {
+        setOpponents(players.length);
+        setStatus(players.length === 2 ? 'Rival en la sala' : 'Esperando rival…');
+      },
+
+      gameStarted: () => handlersRef.current.say('¡Partida iniciada!'),
+
+      beginTurn: ({ currentPlayer }) => {
+        const mine = s.id === currentPlayer;
+        handlersRef.current.onBeginTurn(mine);
+        setStatus(mine ? 'Tu turno' : 'Turno del rival');
+      },
+
+      shotFeedback: (payload) => handlersRef.current.onShotFeedback(payload),
+      incomingShot: (payload) => handlersRef.current.onIncomingShot(payload),
+      gameOver: ({ winner }) => handlersRef.current.onGameOver(s.id === winner),
+
+      gameState: (state) => {
+        if (state.sessionId) {
+          store.set(SESSION_KEY, state.sessionId);
+          s.auth = { ...s.auth, sessionId: state.sessionId };
         }
-        return newGrid;
+        setStatus('Estado sincronizado tras reconectar');
+      },
+
+      opponentDisconnected: ({ grace: seconds }) => {
+        setStatus('El rival ha perdido la conexión');
+        stopGraceCountdown();
+        let left = seconds;
+        setGrace(left);
+        graceTimerRef.current = setInterval(() => {
+          left -= 1;
+          setGrace(left);
+          if (left <= 0) stopGraceCountdown();
+        }, 1000);
+      },
+
+      opponentReconnected: () => {
+        stopGraceCountdown();
+        setStatus('El rival ha vuelto');
+      },
+
+      opponentLeft: () => {
+        stopGraceCountdown();
+        setOpponents(1);
+        setStatus('El rival abandonó la sala');
+        handlersRef.current.say('El rival abandonó la partida.', 'bad');
+      },
+
+      opponentRequestsRestart: () => {
+        handlersRef.current.onRestartState({ opponentWants: true });
+        setStatus('El rival pide revancha');
+      },
+
+      opponentCancelledRestart: () => {
+        handlersRef.current.onRestartState({ opponentWants: false, waiting: false });
+        handlersRef.current.say('El rival canceló la revancha.', 'info');
+      },
+
+      gameRestarted: () => {
+        stopGraceCountdown();
+        handlersRef.current.onRestartState({ waiting: false, opponentWants: false });
+        sendFleet(joinedRoomRef.current);
+        handlersRef.current.say('Nueva ronda. ¡Suerte!', 'good');
+      },
+    };
+
+    Object.entries(listeners).forEach(([event, fn]) => s.on(event, fn));
+    return () => Object.entries(listeners).forEach(([event, fn]) => s.off(event, fn));
+  }, [stopGraceCountdown]);
+
+  useEffect(() => stopGraceCountdown, [stopGraceCountdown]);
+
+  /* ---------------- Acciones ---------------- */
+  const enterRoom = useCallback((room) => {
+    const s = socketRef.current;
+    if (!s?.connected) { setStatus('Todavía sin conexión con el servidor'); return; }
+
+    setBusy(true);
+    s.emit('joinGame', room, (res) => {
+      setBusy(false);
+      if (res?.error) { setStatus(res.error); return; }
+
+      if (res.sessionId) {
+        store.set(SESSION_KEY, res.sessionId);
+        // Sin esto, una reconexión seguía mandando el sessionId de la carga de página
+        s.auth = { ...s.auth, sessionId: res.sessionId };
+      }
+      store.set(GAME_KEY, room);
+
+      setRoom(room);
+      setRoomInput(room);
+      setIsOnline(true);
+      setStatus(`En la sala ${room}. Esperando rival…`);
+
+      const ships = handlersRef.current.startGame(true);
+      s.emit('sendBoard', { gameId: room, ships: fleetPayload(ships) }, (r) => {
+        if (r?.error) handlersRef.current.say(r.error, 'bad');
       });
-
-      const msg = result === 'agua' ? '💦 Fallaste' :
-                  result === 'tocado' ? '🎯 ¡Tocado!' :
-                  result === 'hundido' ? '💥 ¡Hundiste un barco!' :
-                  '❓ Resultado desconocido';
-      setMessage?.(msg);
-
-      if (allSunk) {
-        setMessage?.('🏆 ¡Ganaste la partida!');
-        setGameOver?.(true);
-        setStatus?.('✅ Victoria');
-      }
-    };
-
-    const onGameOver = ({ winner, loser }) => {
-      if (!mountedRef.current) return;
-      const iWon = s.id === winner;
-      console.log('[GameEvent] gameOver - Ganador:', winner.substring(0, 8), '| Yo:', s.id.substring(0, 8));
-      if (!iWon) {
-        setMessage?.('😵 ¡Perdiste la partida!');
-        setGameOver?.(true);
-      }
-    };
-
-    const onOpponentLeft = () => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentLeft - El rival abandonó la partida');
-      
-      // Limpiar timers de gracia
-      if (gracePeriodTimerRef.current) {
-        clearInterval(gracePeriodTimerRef.current);
-        gracePeriodTimerRef.current = null;
-      }
-      setGracePeriodRemaining(0);
-      
-      // Mostrar mensaje y volver a modo local
-      setMessage?.('👋 El rival abandonó la partida');
-      setStatus('🔌 Rival desconectado - Volviendo a modo local...');
-      
-      // Volver a modo local después de 2 segundos
-      setTimeout(() => {
-        cleanupPreviousGameRef.current?.();
-        setIsOnline?.(false);
-        setStatus('Modo local');
-        startGameRef.current?.();
-      }, 2000);
-    };
-
-    const onOpponentDisconnected = ({ grace }) => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentDisconnected - Grace period:', grace, 'segundos');
-      setStatus(`⚠️ Rival desconectado (esperando ${grace}s)`);
-      
-      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
-      let remaining = grace;
-      setGracePeriodRemaining(remaining);
-      
-      gracePeriodTimerRef.current = setInterval(() => {
-        remaining--;
-        setGracePeriodRemaining(remaining);
-        if (remaining <= 0) {
-          clearInterval(gracePeriodTimerRef.current);
-          setStatus('😵 El rival se ha ido');
-        }
-      }, 1000);
-    };
-
-    const onOpponentReconnected = () => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentReconnected');
-      if (gracePeriodTimerRef.current) clearInterval(gracePeriodTimerRef.current);
-      setStatus('✅ Rival reconectado');
-      setGracePeriodRemaining(0);
-    };
-
-    const onGameState = ({ sessionId, playerId, ...state }) => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] gameState - Sincronizando estado después de reconexión');
-      
-      // Guardar sessionId en localStorage para futuras reconexiones
-      if (sessionId) {
-        localStorage.setItem('battleship_sessionId', sessionId);
-      }
-      
-      // Aquí el frontend puede sincronizar el estado del juego
-      // Este evento se emite cuando se reconecta después de un cambio de red
-    };
-
-    const onOpponentRequestsRestart = () => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentRequestsRestart - El rival quiere reiniciar');
-      setOpponentWantsRestart?.(true);
-      setStatus('🎮 El rival quiere jugar otra vez');
-    };
-
-    const onOpponentCancelledRestart = () => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] opponentCancelledRestart - El rival canceló el reinicio');
-      setOpponentWantsRestart?.(false);
-      setWaitingForOpponentRestart?.(false);
-      setMessage?.('❌ El rival canceló el reinicio');
-    };
-
-    const onGameRestarted = () => {
-      if (!mountedRef.current) return;
-      console.log('[GameEvent] gameRestarted - ¡Partida reiniciada!');
-      setWaitingForOpponentRestart?.(false);
-      setOpponentWantsRestart?.(false);
-      setMessage?.('🎉 ¡Partida reiniciada! Nueva ronda');
-      
-      // Reiniciar el juego localmente
-      startGameRef.current?.();
-    };
-
-    s.on('playerJoined', onPlayerJoined);
-    s.on('gameStarted', onGameStarted);
-    s.on('beginTurn', onBeginTurn);
-    s.on('incomingShot', onIncomingShot);
-    s.on('shotFeedback', onShotFeedback);
-    s.on('gameState', onGameState);
-    s.on('opponentLeft', onOpponentLeft);
-    s.on('opponentDisconnected', onOpponentDisconnected);
-    s.on('opponentReconnected', onOpponentReconnected);
-    s.on('opponentRequestsRestart', onOpponentRequestsRestart);
-    s.on('opponentCancelledRestart', onOpponentCancelledRestart);
-    s.on('gameRestarted', onGameRestarted);
-    s.on('gameOver', onGameOver);
-
-    return () => {
-      s.off('playerJoined', onPlayerJoined);
-      s.off('gameStarted', onGameStarted);
-      s.off('beginTurn', onBeginTurn);
-      s.off('incomingShot', onIncomingShot);
-      s.off('shotFeedback', onShotFeedback);
-      s.off('gameState', onGameState);
-      s.off('opponentLeft', onOpponentLeft);
-      s.off('opponentDisconnected', onOpponentDisconnected);
-      s.off('opponentReconnected', onOpponentReconnected);
-      s.off('opponentRequestsRestart', onOpponentRequestsRestart);
-      s.off('opponentCancelledRestart', onOpponentCancelledRestart);
-      s.off('gameRestarted', onGameRestarted);
-      s.off('gameOver', onGameOver);
-      listenersSetupRef.current = false;
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOnline, handleIncomingShot, switchOnlineTurn, setOpponentGrid, setMessage, setGameOver, setIsOnline, setWaitingForOpponentRestart, setOpponentWantsRestart]);
-
-  /* ======================
-     🛠️ Funciones de juego
-  ====================== */
-  
-  // Función para limpiar la partida anterior antes de unirse a una nueva
-  const cleanupPreviousGame = useCallback(() => {
-    const s = socketRef.current;
-    const previousGameId = gameIdRef.current;
-    
-    if (previousGameId && s && s.connected) {
-      console.log('[Cleanup] Saliendo de partida anterior:', previousGameId);
-      s.emit('leaveGame', previousGameId, (res) => {
-        console.log('[Cleanup] Resultado leaveGame:', res);
-      });
-    }
-    
-    // Resetear estado local
-    gameIdRef.current = '';
-    setGameId('');
-    listenersSetupRef.current = false;
-    setIsHost(false);
-    setGracePeriodRemaining(0);
-    if (gracePeriodTimerRef.current) {
-      clearInterval(gracePeriodTimerRef.current);
-      gracePeriodTimerRef.current = null;
-    }
-    
-    // Limpiar localStorage para evitar reconexiones fantasma
-    localStorage.removeItem('battleship_sessionId');
-    localStorage.removeItem('battleship_gameId');
-  }, []);
-  
-  // Mantener cleanupPreviousGameRef actualizada
-  useEffect(() => {
-    cleanupPreviousGameRef.current = cleanupPreviousGame;
-  }, [cleanupPreviousGame]);
-
-  const createGame = useCallback(() => {
-    const s = socketRef.current;
-    if (!s || !s.connected) { setStatus('❌ No conectado'); return; }
-    
-    // Limpiar partida anterior ANTES de crear nueva
-    cleanupPreviousGameRef.current?.();
-    
-    const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
-    setIsConnecting(true);
-    setIsHost(true);
-    console.log('[Action] Creando sala:', newId);
-    
-    s.emit('joinGame', newId, (res) => {
-      setIsConnecting(false);
-      if (res?.error) {
-        console.error('[Error] Error al crear sala:', res.error);
-        return setStatus('❌ ' + res.error);
-      }
-      
-      // Guardar sessionId y gameId para reconexiones
-      if (res?.sessionId) {
-        localStorage.setItem('battleship_sessionId', res.sessionId);
-      }
-      if (res?.gameId) {
-        localStorage.setItem('battleship_gameId', res.gameId);
-      }
-      
-      setGameId(newId);
-      gameIdRef.current = newId;
-      setStatus(`Sala creada: ${newId} 🧭 Esperando rival...`);
-      setIsOnline?.(true);
-      startGameRef.current?.();
-      
-      // Enviar tablero después de entrar a la sala
-      setTimeout(() => {
-        s.emit('sendBoard', { gameId: newId, board: playerGrid });
-      }, 100);
     });
-  }, [setIsOnline, playerGrid]);
+  }, [setIsOnline, setRoom]);
 
-  const joinGame = useCallback(() => {
+  const createRoom = useCallback(() => enterRoom(randomRoomId()), [enterRoom]);
+
+  const joinRoom = useCallback(() => {
+    const room = roomInput.trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{1,32}$/.test(room)) { setStatus('ID inválido: solo letras, números, _ y -'); return; }
+    enterRoom(room);
+  }, [enterRoom, roomInput]);
+
+  const leaveRoom = useCallback(() => {
     const s = socketRef.current;
-    if (!s || !s.connected) { setStatus('❌ No conectado al servidor'); return; }
-    if (!gameId) return setStatus('⚠️ Ingresa un ID válido');
-    
-    // Validar formato de ID
-    if (!/^[A-Z0-9_-]{1,32}$/i.test(gameId.trim())) {
-      return setStatus('❌ ID inválido (solo letras, números, _, -)');
-    }
-    
-    // Limpiar partida anterior ANTES de unirse a nueva
-    cleanupPreviousGameRef.current?.();
-    
-    setIsConnecting(true);
-    const upperGameId = gameId.toUpperCase();
-    console.log('[Action] Uniéndose a sala:', upperGameId);
-    
-    s.emit('joinGame', upperGameId, (res) => {
-      setIsConnecting(false);
-      if (res?.error) {
-        console.error('[Error] Error al unirse:', res.error);
-        return setStatus('❌ ' + res.error);
-      }
-      
-      // Guardar sessionId y gameId para reconexiones
-      if (res?.sessionId) {
-        localStorage.setItem('battleship_sessionId', res.sessionId);
-      }
-      if (res?.gameId) {
-        localStorage.setItem('battleship_gameId', res.gameId);
-      }
-      
-      gameIdRef.current = upperGameId;
-      setStatus(`Unido a sala ${upperGameId} ✨`);
-      setIsOnline?.(true);
-      startGameRef.current?.();
-      
-      // Enviar tablero después de entrar a la sala
-      setTimeout(() => {
-        s.emit('sendBoard', { gameId: upperGameId, board: playerGrid });
-      }, 100);
-    });
-  }, [gameId, playerGrid, setIsOnline]);
+    if (!window.confirm('¿Salir de la partida online?')) return;
 
-  const copyGameId = useCallback(async () => {
-    if (!gameId) return;
+    s?.emit('leaveGame', joinedRoomRef.current, () => {});
+    store.remove(SESSION_KEY);
+    store.remove(GAME_KEY);
+    if (s) s.auth = { ...s.auth, sessionId: undefined };
+
+    stopGraceCountdown();
+    setRoom('');
+    setOpponents(0);
+    setStatus('Sin conectar');
+    setIsOnline(false);
+    handlersRef.current.startGame(false); // volver al tablero local con partida limpia
+  }, [setIsOnline, setRoom, stopGraceCountdown]);
+
+  const copyId = useCallback(async () => {
+    if (!joinedRoom) return;
     try {
-      await navigator.clipboard.writeText(gameId);
-      setStatus('📋 ID copiado al portapapeles');
+      await navigator.clipboard.writeText(joinedRoom);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setStatus('Tu navegador no dejó copiar. Selecciónalo a mano.');
     }
-    catch {
-      setStatus('❌ No se pudo copiar');
-    }
-  }, [gameId]);
+  }, [joinedRoom]);
 
-  const handleModeSwitch = useCallback((toOnline) => {
-    const s = socketRef.current;
-    if (!toOnline) {
-      if (!window.confirm('¿Volver a modo local y abandonar la partida?')) return;
-      // Limpiar partida online
-      cleanupPreviousGameRef.current?.();
-      setIsOnline?.(false);
-      setStatus('Modo local');
-      startGameRef.current?.();
-      return;
-    }
-    if (!window.confirm('¿Cambiar a modo online y reiniciar partida?')) return;
-    // Limpiar cualquier partida anterior al cambiar a modo online
-    cleanupPreviousGameRef.current?.();
-    setIsOnline?.(true);
-    setStatus('Modo online 🌐 Conéctate o crea sala');
-  }, [setIsOnline, isOnline]);
+  /* ---------------- UI ---------------- */
+  if (!isOnline) {
+    return (
+      <section className="panel flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="panel-heading">Jugar online</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Crea una sala y pásale el código a quien quieras. Sin registro.
+          </p>
+        </div>
 
-  /* ======================
-     🎨 UI Mejorada para móvil
-  ====================== */
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="field sm:w-44"
+            value={roomInput}
+            onChange={(e) => setRoomInput(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === 'Enter' && joinRoom()}
+            placeholder="CÓDIGO"
+            maxLength={32}
+            aria-label="Código de sala"
+            disabled={busy}
+          />
+          <button className="btn-ghost" onClick={joinRoom} disabled={busy || !roomInput}>
+            Unirme
+          </button>
+          <button className="btn-primary" onClick={createRoom} disabled={busy}>
+            Crear sala
+          </button>
+        </div>
+
+        <p className={clsx('text-xs', connected ? 'text-emerald-400' : 'text-slate-500')}>
+          {connected ? '● Servidor listo' : `○ ${status}`}
+        </p>
+      </section>
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-3 items-center bg-gradient-to-br from-blue-600/20 to-purple-600/20 backdrop-blur p-4 sm:p-5 rounded-xl shadow-lg border border-white/20 w-full sm:w-auto">
-      {/* Switch Modo Local / Online */}
-      <div className="flex flex-col sm:flex-row gap-2 w-full justify-center">
-        <button
-          onClick={() => handleModeSwitch(false)}
-          className={`w-full sm:w-auto px-4 py-3 font-bold rounded-lg transition-all active:scale-95 ${!isOnline ? 'bg-blue-700 text-white shadow-lg' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-        >
-          🌐 Modo Local
-        </button>
-        <button
-          onClick={() => handleModeSwitch(true)}
-          className={`w-full sm:w-auto px-4 py-3 font-bold rounded-lg transition-all active:scale-95 ${isOnline ? 'bg-red-600 text-white shadow-lg' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
-        >
-          🔴 Modo Online
+    <section className="panel flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-3">
+        <div>
+          <h2 className="panel-heading">Sala</h2>
+          <p className="text-2xl font-black tracking-[0.3em] text-radar">{joinedRoom || '—'}</p>
+        </div>
+        <button className="btn-ghost text-xs" onClick={copyId} disabled={!joinedRoom}>
+          {copied ? 'Copiado' : 'Copiar código'}
         </button>
       </div>
 
-      {/* Controles Online */}
-      {isOnline && (
-        <div className="flex flex-col gap-3 w-full items-center">
-          <div className="flex flex-col sm:flex-row gap-2 w-full justify-center items-stretch sm:items-center">
-            <input
-              type="text"
-              value={gameId}
-              onChange={(e) => setGameId(e.target.value.toUpperCase())}
-              placeholder="ID de partida (ej: ABC123)"
-              maxLength={32}
-              className="w-full sm:w-auto px-3 py-2 rounded-lg border-2 border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent disabled:bg-gray-100"
-              disabled={isConnecting}
-            />
-            <button
-              onClick={joinGame}
-              disabled={isConnecting || !gameId}
-              className="bg-green-600 text-white px-4 py-2 rounded-lg w-full sm:w-auto font-semibold hover:bg-green-700 disabled:bg-gray-400 active:scale-95 transition-all"
-            >
-              ✅ Unirse
-            </button>
-            <button
-              onClick={createGame}
-              disabled={isConnecting}
-              className="bg-blue-600 text-white px-4 py-2 rounded-lg w-full sm:w-auto font-semibold hover:bg-blue-700 disabled:bg-gray-400 active:scale-95 transition-all"
-            >
-              ⚡ Crear
-            </button>
-            <button
-              onClick={copyGameId}
-              disabled={!gameId}
-              className="bg-blue-400 text-white px-3 py-2 rounded-lg w-full sm:w-auto font-medium hover:bg-blue-500 disabled:bg-gray-200 active:scale-95 transition-all"
-            >
-              📋 Copiar
-            </button>
+      <div className="flex-1 text-center">
+        <p className="text-sm font-semibold text-slate-200">{status}</p>
+        <p className="text-xs text-slate-500">
+          {opponents < 2 ? 'Comparte el código para que entre tu rival' : 'Sala completa'}
+          {grace > 0 && ` · ${grace}s para que vuelva`}
+        </p>
+        {opponents < 2 && (
+          <div className="mx-auto mt-2 h-8 w-8 overflow-hidden rounded-full border border-radar/30">
+            <div className="radar-sweep h-full w-full animate-sweep" aria-hidden="true" />
           </div>
-          <div className="text-center text-sm sm:text-base mt-1 font-medium text-gray-700">
-            {isConnecting ? '⏳ Conectando...' : (
-              <>
-                {status}
-                {isTemporarilyDisconnected && (
-                  <div className="text-amber-600 font-bold">⚠️ Reconectando...</div>
-                )}
-                {gracePeriodRemaining > 0 && (
-                  <div className="text-red-600 font-bold">⏱️ {gracePeriodRemaining}s para reconectar</div>
-                )}
-              </>
-            )}
-          </div>
-          <div className="text-center text-xs text-gray-600 mt-1">
-            🔗 Servidor: {SERVER_URL.split('//')[1]?.split('/')[0] || SERVER_URL}
-          </div>
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+
+      <button className="btn-danger" onClick={leaveRoom}>Salir</button>
+    </section>
   );
 };
 
