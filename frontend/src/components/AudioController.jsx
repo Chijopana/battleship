@@ -1,92 +1,103 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import clsx from 'clsx';
+
+const PRESETS = [
+  { label: '25', value: 0.25 },
+  { label: '50', value: 0.5 },
+  { label: '75', value: 0.75 },
+  { label: 'Máx', value: 1 },
+];
 
 /**
- * Componente de control de audio (volumen, mute, música)
+ * Control de audio en un desplegable. Se cierra al hacer click fuera o con Escape.
  */
 const AudioController = ({ isMuted, setIsMuted, volume, setVolume }) => {
-  const [showControls, setShowControls] = useState(false);
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (e) => {
+      if (!wrapperRef.current?.contains(e.target)) setOpen(false);
+    };
+    const onKeyDown = (e) => { if (e.key === 'Escape') setOpen(false); };
+
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  const icon = isMuted ? '🔇' : volume > 0.5 ? '🔊' : '🔉';
 
   return (
-    <div className="fixed top-4 right-4 z-50">
-      <div className="flex flex-col items-end gap-2">
-        {/* Botón principal de audio */}
-        <button
-          onClick={() => setShowControls(!showControls)}
-          className="bg-white/90 hover:bg-white backdrop-blur rounded-full p-3 shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-110"
-          aria-label="Controles de audio"
-        >
-          <span className="text-2xl">
-            {isMuted ? '🔇' : volume > 0.5 ? '🔊' : '🔉'}
-          </span>
-        </button>
-
-        {/* Panel de controles desplegable */}
-        {showControls && (
-          <div className="bg-white/95 backdrop-blur rounded-xl p-4 shadow-2xl animate-slide-in space-y-3 min-w-[200px]">
-            <h3 className="font-bold text-gray-800 text-sm mb-2">🎵 Audio</h3>
-            
-            {/* Control de mute */}
-            <button
-              onClick={() => setIsMuted(!isMuted)}
-              className={`w-full py-2 px-3 rounded-lg font-semibold transition-all duration-200 ${
-                isMuted 
-                  ? 'bg-red-500 hover:bg-red-600 text-white' 
-                  : 'bg-green-500 hover:bg-green-600 text-white'
-              }`}
-            >
-              {isMuted ? '🔇 Silenciado' : '🔊 Sonido ON'}
-            </button>
-
-            {/* Slider de volumen */}
-            <div className="space-y-1">
-              <label className="text-xs text-gray-600 font-medium">
-                Volumen: {Math.round(volume * 100)}%
-              </label>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                value={volume * 100}
-                onChange={(e) => setVolume(e.target.value / 100)}
-                disabled={isMuted}
-                className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50"
-              />
-            </div>
-
-            {/* Presets de volumen */}
-            <div className="flex gap-2">
-              <button
-                onClick={() => setVolume(0.25)}
-                className="flex-1 py-1 px-2 text-xs bg-gray-200 hover:bg-gray-300 rounded transition-colors"
-                disabled={isMuted}
-              >
-                25%
-              </button>
-              <button
-                onClick={() => setVolume(0.5)}
-                className="flex-1 py-1 px-2 text-xs bg-gray-200 hover:bg-gray-300 rounded transition-colors"
-                disabled={isMuted}
-              >
-                50%
-              </button>
-              <button
-                onClick={() => setVolume(0.75)}
-                className="flex-1 py-1 px-2 text-xs bg-gray-200 hover:bg-gray-300 rounded transition-colors"
-                disabled={isMuted}
-              >
-                75%
-              </button>
-              <button
-                onClick={() => setVolume(1)}
-                className="flex-1 py-1 px-2 text-xs bg-gray-200 hover:bg-gray-300 rounded transition-colors"
-                disabled={isMuted}
-              >
-                Max
-              </button>
-            </div>
-          </div>
+    <div ref={wrapperRef} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label="Ajustes de sonido"
+        className={clsx(
+          'btn h-11 w-11 rounded-xl border border-white/15 bg-white/5 p-0 text-lg',
+          'hover:border-radar/50 hover:bg-white/10',
+          open && 'border-radar/60 bg-white/10'
         )}
-      </div>
+      >
+        <span aria-hidden="true">{icon}</span>
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Sonido"
+          className="animate-rise-in panel absolute right-0 z-50 mt-2 w-56 space-y-3 p-4"
+        >
+          <button
+            onClick={() => setIsMuted(!isMuted)}
+            className={clsx('btn w-full', isMuted ? 'btn-danger' : 'btn-primary')}
+          >
+            {isMuted ? 'Sonido silenciado' : 'Sonido activo'}
+          </button>
+
+          <div className="space-y-1.5">
+            <label htmlFor="volume" className="panel-heading block">
+              Volumen · {Math.round(volume * 100)}%
+            </label>
+            <input
+              id="volume"
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              value={Math.round(volume * 100)}
+              onChange={(e) => setVolume(Number(e.target.value) / 100)}
+              disabled={isMuted}
+              className="h-2 w-full cursor-pointer appearance-none rounded-full bg-white/15 accent-radar disabled:cursor-not-allowed disabled:opacity-40"
+            />
+          </div>
+
+          <div className="flex gap-1.5">
+            {PRESETS.map(({ label, value }) => (
+              <button
+                key={label}
+                onClick={() => setVolume(value)}
+                disabled={isMuted}
+                className={clsx(
+                  'btn flex-1 px-0 py-1.5 text-xs',
+                  Math.abs(volume - value) < 0.01
+                    ? 'bg-radar text-abyss'
+                    : 'border border-white/15 bg-white/5 text-slate-300 hover:bg-white/10'
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
