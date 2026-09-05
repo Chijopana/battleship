@@ -1,0 +1,35 @@
+# Dependencias
+node_modules/
+
+# Builds
+dist/
+build/
+frontend/dist/
+android/app/src/main/assets/public/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/.idea/
+
+# Cachés de herramientas
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# Entorno
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

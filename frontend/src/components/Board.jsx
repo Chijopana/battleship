@@ -1,115 +1,79 @@
-import React, { useMemo } from 'react';
-import clsx from 'clsx';
+import React, { useCallback, useRef, useState } from 'react';
+import BoardGrid from './BoardGrid';
+import Cell from './Cell';
+import { BOARD_SIZE } from '../game/logic';
+
+const clamp = (v) => Math.max(0, Math.min(BOARD_SIZE - 1, v));
 
 /**
- * Componente Board
- * Representa el tablero de Battleship para jugador u oponente.
+ * Tablero de juego.
  *
- * Props:
- * - grid: Matriz de celdas [{ hasShip, hit, shipSunk?, type? }]
- * - isPlayer: bool → si es el tablero del jugador
- * - onCellClick: función(row, col) para manejar disparos en tablero enemigo
- * - mode: string → 'normal' | 'fogOfWar'
- * - disabled: bool → desactiva clicks
+ * El tablero enemigo se puede jugar con el teclado: las flechas mueven la mira
+ * y Enter o Espacio disparan (tabindex móvil, un solo tab-stop para todo el tablero).
  */
-const Board = ({ grid, isPlayer, onCellClick, mode = 'normal', disabled = false }) => {
-  if (!grid || !Array.isArray(grid)) return null;
+const Board = ({
+  grid,
+  isPlayer = false,
+  disabled = false,
+  hideResults = false,
+  revealAll = false,
+  lastShot = null,
+  onFire,
+}) => {
+  const gridRef = useRef(null);
+  const [cursor, setCursor] = useState({ row: 0, col: 0 });
+  const [hover, setHover] = useState(null);
 
-  const [lastHitCell, setLastHitCell] = React.useState(null);
+  const focusCell = useCallback((row, col) => {
+    setCursor({ row, col });
+    gridRef.current?.querySelector(`button[data-cell="${row}-${col}"]`)?.focus();
+  }, []);
 
-  const handleCellClick = (row, col, cell) => {
-    if (disabled || isPlayer) return;
-    if (cell.hit) return;
-    setLastHitCell(`${row}-${col}`);
-    setTimeout(() => setLastHitCell(null), 600);
-    if (onCellClick) onCellClick(row, col);
-  };
-
-  const handleCellTouchStart = (e) => {
-    // Prevenir zoom en touch
-    if (e.touches.length > 1) e.preventDefault();
-  };
-
-  const getCellColor = (cell) => {
-    const { hit, hasShip, shipSunk, type } = cell;
-
-    if (isPlayer) {
-      if (hasShip && hit) return shipSunk ? 'bg-red-700 animate-impact' : 'bg-red-600 animate-pulse';
-      if (hasShip) return 'bg-gray-600';
-      if (hit && !hasShip) return 'bg-blue-300';
-      return 'bg-blue-200';
+  const handleKeyDown = useCallback((event) => {
+    if (isPlayer || disabled) return;
+    const moves = {
+      ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
+    };
+    const move = moves[event.key];
+    if (move) {
+      event.preventDefault();
+      focusCell(clamp(cursor.row + move[0]), clamp(cursor.col + move[1]));
+      return;
     }
+    if (event.key === 'Home') { event.preventDefault(); focusCell(cursor.row, 0); }
+    if (event.key === 'End') { event.preventDefault(); focusCell(cursor.row, BOARD_SIZE - 1); }
+  }, [cursor, disabled, focusCell, isPlayer]);
 
-    if (type) {
-      switch (type) {
-        case 'agua': return 'bg-blue-300';
-        case 'tocado': return 'bg-orange-500 animate-pulse';
-        case 'hundido': return 'bg-red-700 animate-impact';
-        default: return 'bg-gray-400';
-      }
-    }
+  const handleHover = useCallback((row, col) => setHover({ row, col }), []);
 
-    // Fog of war: oculta TODO excepto los disparos realizados
-    if (mode === 'fogOfWar') {
-      if (!hit) return 'bg-blue-200 hover:bg-blue-300 focus:bg-blue-300';
-      return 'bg-gray-400';
-    }
-
-    if (hit && hasShip) return shipSunk ? 'bg-red-700 animate-impact' : 'bg-orange-500 animate-pulse';
-    if (hit && !hasShip) return 'bg-blue-300';
-    return 'bg-blue-200 hover:bg-blue-300 focus:bg-blue-300';
-  };
+  if (!Array.isArray(grid) || grid.length === 0) return null;
 
   return (
-    <div
-      role="grid"
-      aria-label={isPlayer ? "Tablero del jugador" : "Tablero del enemigo"}
-      className={clsx(
-        'grid grid-cols-10 gap-0.5 sm:gap-1 p-2 rounded-lg border-2 water-effect transition-all duration-300',
-        isPlayer ? 'border-gray-500 bg-gradient-to-b from-blue-100 to-blue-200 shadow-md' : 'border-purple-600 bg-gradient-to-b from-blue-200 to-blue-300 shadow-xl'
+    <BoardGrid
+      ref={gridRef}
+      ariaLabel={isPlayer ? 'Tu tablero' : 'Tablero enemigo'}
+      hover={hover}
+      disabled={disabled}
+      className={disabled && !isPlayer ? 'board-locked' : undefined}
+      onKeyDown={handleKeyDown}
+      onMouseLeave={() => setHover(null)}
+      renderCell={(row, col) => (
+        <Cell
+          cell={grid[row][col]}
+          row={row}
+          col={col}
+          isPlayer={isPlayer}
+          hideResults={hideResults}
+          revealAll={revealAll}
+          disabled={disabled}
+          isLast={lastShot?.row === row && lastShot?.col === col}
+          isCrosshair={!isPlayer && (hover?.row === row || hover?.col === col)}
+          focusable={cursor.row === row && cursor.col === col}
+          onFire={onFire}
+          onHover={handleHover}
+        />
       )}
-    >
-      {grid.map((row, rowIndex) =>
-        row.map((cell, colIndex) => {
-          const cellKey = `${rowIndex}-${colIndex}`;
-          const isAnimating = lastHitCell === cellKey;
-          const cellColor = useMemo(() => getCellColor(cell), [cell, mode, isPlayer]);
-          const tooltipText = isPlayer
-            ? cell.hasShip
-              ? cell.hit ? "Barco tocado" : "Barco intacto"
-              : cell.hit ? "Agua" : "Vacío"
-            : cell.hit
-              ? cell.type === 'agua' ? "Agua" : cell.type === 'tocado' ? "Tocado" : "Hundido"
-              : "Sin disparar";
-
-          return (
-            <div
-              key={`${rowIndex}-${colIndex}`}
-              role="gridcell"
-              aria-label={tooltipText}
-              tabIndex={disabled ? -1 : 0}
-              onClick={() => handleCellClick(rowIndex, colIndex, cell)}
-              onTouchStart={handleCellTouchStart}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  handleCellClick(rowIndex, colIndex, cell);
-                }
-              }}
-              title={tooltipText}
-              className={clsx(
-                'w-6 h-6 sm:w-8 sm:h-8 md:w-10 md:h-10 border-2 rounded cursor-pointer transition-all duration-150 select-none',
-                cellColor,
-                isAnimating && 'animate-explosion shadow-xl ring-2 ring-yellow-400',
-                disabled && !isPlayer ? 'cursor-not-allowed opacity-50' : '',
-                !isPlayer && !cell.hit && !disabled ? 'hover:scale-125 active:scale-90 hover:shadow-lg hover:border-yellow-300' : '',
-                'focus:outline-none focus:ring-2 focus:ring-yellow-400 border-opacity-70'
-              )}
-            />
-          );
-        })
-      )}
-    </div>
+    />
   );
 };
 
