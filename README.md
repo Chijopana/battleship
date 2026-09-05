@@ -11,6 +11,7 @@ duelos online por código de sala con un servidor Socket.IO **autoritativo**.
 
 | | |
 |---|---|
+| **Colocación manual** | Despliegas tu flota donde quieras: eliges el barco, lo giras con `R` y lo sueltas. Con vista previa en verde o rojo, "al azar", "rellenar" y colocación por teclado |
 | **5 modos** | Clásico · Salva (disparas tantas veces como barcos te queden) · Fuego rápido (3/turno) · Niebla (no sabes el resultado hasta el final) · Hardcore (fallas y pierdes) |
 | **IA en 3 niveles** | Grumete (azar), Oficial (remata lo tocado), Almirante (extiende la línea del barco y peina en patrón de damas) |
 | **Online** | Salas por código, turnos y resultados calculados en el servidor, reconexión con periodo de gracia y revancha con aceptación bilateral |
@@ -48,8 +49,9 @@ componentes y la comparten el modo local y el online.
 
 El servidor es la única fuente de verdad:
 
-1. Cada cliente manda su flota con `sendBoard`. El servidor **valida** que sean cinco
-   barcos de los tamaños correctos, rectos, contiguos, dentro del tablero y sin solaparse.
+1. Cada jugador coloca su flota y la confirma; entonces se manda con `sendBoard`. El
+   servidor **valida** que sean cinco barcos de los tamaños correctos, rectos, contiguos,
+   dentro del tablero y sin solaparse.
 2. Al disparar, el cliente solo manda coordenadas. El servidor comprueba el turno,
    resuelve el impacto contra la flota del rival y avisa a los dos.
 3. El resultado de un disparo nunca lo decide quien recibe el disparo, así que un cliente
@@ -82,8 +84,8 @@ En producción usa `VITE_SOCKET_URL` de `frontend/.env.production`.
 ### Tests
 
 ```bash
-cd frontend && npm test   # lógica de juego + interfaz (jsdom)
-cd backend  && npm test   # partidas online completas entre dos clientes
+cd frontend && npm test   # 81 tests: lógica, colocación, partida local e interfaz online
+cd backend  && npm test   # 8 tests: partidas online completas entre dos clientes
 ```
 
 ### Despliegue
@@ -97,10 +99,13 @@ cd backend  && npm test   # partidas online completas entre dos clientes
 ## 🎯 Cómo jugar
 
 1. Elige modo y nivel del rival.
-2. Dispara en el tablero de la derecha: con el ratón, o moviéndote con las flechas y
+2. **Despliega tu flota.** Viene repartida, así que puedes empezar de un clic, o
+   recolocarla: pulsa un barco del muelle, gíralo con `R` y suéltalo en el tablero.
+   Un barco ya colocado se levanta pulsándolo otra vez.
+3. Dispara en el tablero de la derecha: con el ratón, o moviéndote con las flechas y
    pulsando Enter.
-3. Hunde los cinco barcos enemigos antes de que caiga tu flota.
-4. Para jugar contra alguien, pulsa **Crear sala** y pásale el código.
+4. Hunde los cinco barcos enemigos antes de que caiga tu flota.
+5. Para jugar contra alguien, pulsa **Crear sala** y pásale el código.
 
 ---
 

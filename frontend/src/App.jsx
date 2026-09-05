@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import Board from './components/Board';
+import PlacementBoard from './components/PlacementBoard';
 import FleetStatus from './components/FleetStatus';
 import OnlineMode from './components/OnlineMode';
 import AudioController from './components/AudioController';
@@ -12,8 +13,10 @@ import {
   applyShot,
   markShot,
   shipsRemaining,
+  fleetPayload,
   cellLabel,
 } from './game/logic';
+import { randomRoster, rosterToFleet, rosterComplete } from './game/placement';
 import { chooseBotShot } from './game/bot';
 import { MODE_LIST, DIFFICULTY_LIST, getMode, shotsFor } from './game/modes';
 
@@ -31,6 +34,8 @@ const App = () => {
   const [botGrid, setBotGrid] = useState(() => createEmptyBoard());
   const [botShips, setBotShips] = useState([]);
 
+  const [phase, setPhase] = useState('placing');   // 'placing' | 'playing'
+  const [roster, setRoster] = useState(() => randomRoster());
   const [turn, setTurn] = useState('player');       // 'player' | 'bot' | 'waiting'
   const [pendingShots, setPendingShots] = useState(1);
   const [gameOver, setGameOver] = useState(false);
@@ -45,6 +50,7 @@ const App = () => {
   const [onlineShips, setOnlineShips] = useState({ mine: TOTAL_SHIPS, theirs: TOTAL_SHIPS });
   const [restart, setRestart] = useState({ waiting: false, opponentWants: false });
   const [socketInstance, setSocketInstance] = useState(null);
+  const [room, setRoom] = useState('');
 
   const {
     isMuted, setIsMuted, volume, setVolume,
@@ -62,6 +68,8 @@ const App = () => {
   const difficultyRef = useRef(difficulty);
   const gameOverRef = useRef(gameOver);
   const isOnlineRef = useRef(isOnline);
+  const rosterRef = useRef(roster);
+  const roomRef = useRef(room);
   const timersRef = useRef([]);
 
   playerGridRef.current = playerGrid;
@@ -70,6 +78,8 @@ const App = () => {
   difficultyRef.current = difficulty;
   gameOverRef.current = gameOver;
   isOnlineRef.current = isOnline;
+  rosterRef.current = roster;
+  roomRef.current = room;
 
   /** setTimeout con registro, para poder cancelarlos todos al reiniciar o desmontar. */
   const schedule = useCallback((fn, delay) => {
@@ -91,45 +101,70 @@ const App = () => {
   const say = useCallback((text, tone = 'info') => setMessage({ text, tone }), []);
 
   /**
-   * Prepara una partida nueva. Devuelve la flota del jugador para que el modo
-   * online pueda enviarla al servidor sin esperar al siguiente render.
-   *
-   * `forOnline` se pasa explícitamente desde OnlineMode: al entrar o salir de una
-   * sala, `setIsOnline` todavía no se ha aplicado cuando hay que repartir la flota.
+   * Abre una partida nueva en la fase de colocación. La flota del jugador no
+   * queda fijada hasta que confirma en `confirmPlacement`.
    */
-  const startGame = useCallback((forOnline = isOnlineRef.current) => {
+  const startGame = useCallback(() => {
     clearTimers();
 
-    const player = emptyFleet();
     const bot = emptyFleet();
-
-    setPlayerGrid(player.board);
-    setPlayerShips(player.ships);
-    playerGridRef.current = player.board;
-    playerShipsRef.current = player.ships;
-
     setBotGrid(bot.board);
     setBotShips(bot.ships);
+
+    // Se conserva la última disposición: repetir partida es un clic, y quien
+    // quiera recolocar sigue teniendo el tablero delante.
+    setRoster(prev => (rosterComplete(prev) ? prev : randomRoster()));
+
+    setPlayerGrid(createEmptyBoard());
+    setPlayerShips([]);
+    playerGridRef.current = createEmptyBoard();
+    playerShipsRef.current = [];
+
     setOpponentGrid(createEmptyBoard());
     setOnlineShips({ mine: TOTAL_SHIPS, theirs: TOTAL_SHIPS });
 
+    setPhase('placing');
+    setTurn('waiting');
+    setPendingShots(0);
     setGameOver(false);
     setOutcome(null);
     setMessage(null);
     setLastPlayerShot(null);
     setLastBotShot(null);
     setRestart({ waiting: false, opponentWants: false });
+  }, [clearTimers]);
 
-    if (forOnline) {
+  /**
+   * El jugador da por buena su flota: se fija el tablero y empieza la partida.
+   * En online es el momento de mandarla al servidor, que la valida.
+   */
+  const confirmPlacement = useCallback(() => {
+    const current = rosterRef.current;
+    if (!rosterComplete(current)) return;
+
+    playClickSound();
+    const fleet = rosterToFleet(current);
+    setPlayerGrid(fleet.board);
+    setPlayerShips(fleet.ships);
+    playerGridRef.current = fleet.board;
+    playerShipsRef.current = fleet.ships;
+    setPhase('playing');
+
+    if (isOnlineRef.current) {
       setTurn('waiting');
       setPendingShots(0);
-    } else {
-      setTurn('player');
-      setPendingShots(shotsFor(modeRef.current, TOTAL_SHIPS));
+      say('Flota desplegada. Esperando al rival…');
+      socketInstance?.emit(
+        'sendBoard',
+        { gameId: roomRef.current, ships: fleetPayload(fleet.ships) },
+        (res) => { if (res?.error) say(res.error, 'bad'); }
+      );
+      return;
     }
 
-    return player.ships;
-  }, [clearTimers]);
+    setTurn('player');
+    setPendingShots(shotsFor(modeRef.current, TOTAL_SHIPS));
+  }, [playClickSound, say, socketInstance]);
 
   // Cambiar de modo o de dificultad reparte partida nueva.
   // Entrar y salir de una sala online lo gestiona OnlineMode llamando a startGame.
@@ -214,7 +249,7 @@ const App = () => {
   }, [socketInstance, say]);
 
   const handlePlayerShot = useCallback((row, col) => {
-    if (gameOver || turn !== 'player' || pendingShots <= 0) return;
+    if (phase !== 'playing' || gameOver || turn !== 'player' || pendingShots <= 0) return;
 
     if (isOnline) return fireOnline(row, col);
 
@@ -246,7 +281,7 @@ const App = () => {
     setPendingShots(left);
     if (left <= 0) startBotTurn();
   }, [
-    gameOver, turn, pendingShots, isOnline, fireOnline, botGrid, botShips,
+    phase, gameOver, turn, pendingShots, isOnline, fireOnline, botGrid, botShips,
     playResultSound, modeConfig, say, finish, startBotTurn,
   ]);
 
@@ -299,6 +334,7 @@ const App = () => {
 
     onRestartState: (next) => setRestart(prev => ({ ...prev, ...next })),
 
+    setRoom,
     startGame,
     say,
   }), [finish, playResultSound, say, startGame]);
@@ -328,7 +364,7 @@ const App = () => {
 
   /* ======================= CAMBIOS DE CONFIGURACIÓN ======================= */
 
-  const inProgress = !gameOver && (lastPlayerShot || lastBotShot);
+  const inProgress = phase === 'playing' && !gameOver && (lastPlayerShot || lastBotShot);
 
   const changeSetting = useCallback((setter, value, current) => {
     if (value === current) return;
@@ -338,9 +374,13 @@ const App = () => {
   }, [inProgress, playClickSound]);
 
   const enemyBoard = isOnline ? opponentGrid : botGrid;
-  const myShipsLeft = isOnline ? onlineShips.mine : shipsRemaining(playerShips);
+  // Durante el despliegue la flota está intacta; playerShips aún está vacío
+  const myShipsLeft = isOnline ? onlineShips.mine
+    : phase === 'placing' ? TOTAL_SHIPS
+      : shipsRemaining(playerShips);
   const enemyShipsLeft = isOnline ? onlineShips.theirs : shipsRemaining(botShips);
-  const myTurn = turn === 'player' && !gameOver;
+  const myTurn = phase === 'playing' && turn === 'player' && !gameOver;
+  const placing = phase === 'placing';
 
   const toneClass = {
     good: 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200',
@@ -367,7 +407,7 @@ const App = () => {
             className="btn-ghost"
             onClick={() => { playClickSound(); if (!isOnline) startGame(); }}
             disabled={isOnline}
-            title={isOnline ? 'En online el reinicio lo acordáis los dos' : 'Empezar una partida nueva'}
+            title={isOnline ? 'En online el reinicio lo acordáis los dos' : 'Volver a colocar la flota y empezar de cero'}
           >
             Nueva partida
           </button>
@@ -436,9 +476,11 @@ const App = () => {
 
       {/* ---- Marcador ---- */}
       <section className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
-        <Stat label="Turno" value={
-          gameOver ? 'Final' : myTurn ? 'Tuyo' : isOnline ? 'Del rival' : 'Del rival'
-        } accent={myTurn && !gameOver} />
+        <Stat
+          label="Turno"
+          value={placing ? 'Despliegue' : gameOver ? 'Final' : myTurn ? 'Tuyo' : 'Del rival'}
+          accent={myTurn || placing}
+        />
         <Stat label="Disparos este turno" value={myTurn ? pendingShots : '—'} />
         <Stat label="Tu flota" value={`${myShipsLeft}/${TOTAL_SHIPS}`} />
         <Stat label="Flota enemiga" value={`${enemyShipsLeft}/${TOTAL_SHIPS}`} />
@@ -456,7 +498,22 @@ const App = () => {
         )}
       </div>
 
+      {/* ---- Colocación de la flota ---- */}
+      {placing && (
+        <PlacementBoard
+          roster={roster}
+          setRoster={setRoster}
+          onConfirm={confirmPlacement}
+          title="Despliega tu flota"
+          subtitle={isOnline
+            ? 'Coloca tus barcos y confirma: el rival no verá dónde están.'
+            : 'Coloca tus cinco barcos donde quieras antes de empezar.'}
+          confirmLabel={isOnline ? 'Enviar flota' : 'Empezar partida'}
+        />
+      )}
+
       {/* ---- Tableros ---- */}
+      {!placing && (
       <main className="grid gap-4 lg:grid-cols-[1fr_auto_1fr] lg:items-start lg:gap-6">
         <section className="panel p-3 sm:p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -506,6 +563,7 @@ const App = () => {
           </p>
         </section>
       </main>
+      )}
 
       {/* ---- Final de partida ---- */}
       {gameOver && (

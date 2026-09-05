@@ -1,6 +1,6 @@
 import React from 'react';
 import clsx from 'clsx';
-import { SHIP_NAMES, SHIP_SIZES } from '../game/logic';
+import { SHIP_CLASSES } from '../game/logic';
 
 /**
  * Estado de una flota. Acepta la lista real de barcos (modo local, sabemos
@@ -8,10 +8,10 @@ import { SHIP_NAMES, SHIP_SIZES } from '../game/logic';
  * no revela qué barco concreto se hundió).
  */
 const FleetStatus = ({ title, ships = null, remaining = null, tone = 'radar' }) => {
-  const sizes = [...SHIP_SIZES].sort((a, b) => b - a);
+  const classes = [...SHIP_CLASSES].sort((a, b) => b.size - a.size);
   const list = ships
     ? [...ships].sort((a, b) => b.size - a.size)
-    : sizes.map((size, i) => ({ size, sunk: i >= (remaining ?? sizes.length) }));
+    : classes.map((ship, i) => ({ ...ship, sunk: i >= (remaining ?? classes.length) }));
 
   const alive = list.filter(s => !s.sunk).length;
   const accent = tone === 'sunk' ? 'text-sunk' : 'text-radar';
@@ -34,7 +34,7 @@ const FleetStatus = ({ title, ships = null, remaining = null, tone = 'radar' }) 
                 ship.sunk ? 'text-slate-600 line-through' : 'text-slate-400'
               )}
             >
-              {SHIP_NAMES[ship.size] ?? `Barco ${ship.size}`}
+              {ship.name ?? `Barco ${ship.size}`}
             </span>
 
             <span className="flex gap-[3px]" aria-hidden="true">

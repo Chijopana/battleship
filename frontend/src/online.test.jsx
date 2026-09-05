@@ -52,11 +52,17 @@ const sentEvents = (event) => socket.sent.filter(s => s.event === event);
 
 const push = (event, payload) => act(() => { socket.push(event, payload); });
 
-/** Entra en una sala online y deja la partida lista para disparar. */
+/** Entra en una sala online; queda en fase de despliegue. */
 const joinRoom = async (user) => {
   await user.click(screen.getByRole('button', { name: /crear sala/i }));
   push('playerJoined', { players: [MY_ID, RIVAL_ID] });
 };
+
+/** Confirma la flota repartida, que es cuando se manda al servidor. */
+const deploy = (user) => user.click(screen.getByRole('button', { name: /enviar flota/i }));
+
+/** Entra en la sala y despliega, dejando la partida lista. */
+const joinAndDeploy = async (user) => { await joinRoom(user); await deploy(user); };
 
 beforeEach(() => {
   socket.reset();
@@ -67,10 +73,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('modo online', () => {
-  it('al crear sala manda la flota que acaba de repartir', async () => {
+  it('no manda nada hasta que confirmas el despliegue', async () => {
     const user = userEvent.setup();
     render(<App />);
     await joinRoom(user);
+
+    expect(sentEvents('sendBoard')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: /enviar flota/i })).toBeTruthy();
+
+    await deploy(user);
 
     const [join] = sentEvents('joinGame');
     expect(join.payload).toMatch(/^[A-Z0-9]{6}$/);
@@ -86,7 +97,7 @@ describe('modo online', () => {
   it('guarda el sessionId también en el auth del socket, para reconectar', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     expect(localStorage.getItem('battleship_sessionId')).toBe('sess-1');
     expect(socket.auth.sessionId).toBe('sess-1');
@@ -95,7 +106,7 @@ describe('modo online', () => {
   it('espera turno hasta que el servidor lo concede', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     expect(stat('Turno')).toBe('Del rival');
     expect(within(enemyBoard()).getAllByRole('gridcell').filter(c => !c.disabled)).toHaveLength(0);
@@ -108,7 +119,7 @@ describe('modo online', () => {
   it('dispara mandando solo coordenadas y pinta el resultado del servidor', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('beginTurn', { currentPlayer: MY_ID });
 
     await user.click(cellByLabel(enemyBoard(), 'C3'));
@@ -124,7 +135,7 @@ describe('modo online', () => {
   it('un barco hundido se pinta entero y baja el marcador rival', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('beginTurn', { currentPlayer: MY_ID });
 
     push('shotFeedback', {
@@ -142,7 +153,7 @@ describe('modo online', () => {
   it('los disparos del rival marcan tu tablero y bajan tu marcador', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     push('incomingShot', {
       row: 0, col: 0, result: 'hundido', sunkShip: [[0, 0], [0, 1]],
@@ -156,7 +167,7 @@ describe('modo online', () => {
   it('anuncia victoria cuando cae la flota rival', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('beginTurn', { currentPlayer: MY_ID });
 
     push('shotFeedback', {
@@ -171,7 +182,7 @@ describe('modo online', () => {
   it('anuncia derrota cuando el servidor da ganador al rival', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     push('gameOver', { winner: RIVAL_ID, loser: MY_ID });
     expect(screen.getByText('Derrota')).toBeTruthy();
@@ -180,7 +191,7 @@ describe('modo online', () => {
   it('la revancha reenvía la flota: sin esto la partida reiniciada no arranca', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('gameOver', { winner: RIVAL_ID, loser: MY_ID });
 
     const boardsBefore = sentEvents('sendBoard').length;
@@ -193,15 +204,16 @@ describe('modo online', () => {
 
     // El servidor vacía las flotas al reiniciar; si el cliente no reenvía la suya,
     // nunca se emite beginTurn y la revancha se queda colgada.
-    expect(sentEvents('sendBoard')).toHaveLength(boardsBefore + 1);
     expect(screen.queryByText('Derrota')).toBeNull();
+    await deploy(user);
+    expect(sentEvents('sendBoard')).toHaveLength(boardsBefore + 1);
     expect(stat('Tu flota')).toBe('5/5');
   });
 
   it('avisa cuando el rival pide revancha', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('gameOver', { winner: RIVAL_ID, loser: MY_ID });
 
     push('opponentRequestsRestart', {});
@@ -212,7 +224,7 @@ describe('modo online', () => {
   it('muestra la cuenta atrás si el rival se desconecta', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     push('opponentDisconnected', { grace: 60 });
     expect(screen.getByText(/60s para que vuelva/i)).toBeTruthy();
@@ -224,20 +236,20 @@ describe('modo online', () => {
   it('salir de la sala vuelve al modo local con partida limpia', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
 
     await user.click(screen.getByRole('button', { name: /^salir$/i }));
 
     expect(sentEvents('leaveGame')).toHaveLength(1);
     expect(localStorage.getItem('battleship_sessionId')).toBeNull();
     expect(screen.getByRole('button', { name: /crear sala/i })).toBeTruthy();
-    expect(stat('Turno')).toBe('Tuyo'); // el modo local ya está jugable
+    expect(stat('Turno')).toBe('Despliegue'); // vuelta al modo local, listo para colocar
   });
 
   it('un error del servidor se muestra y devuelve el turno', async () => {
     const user = userEvent.setup();
     render(<App />);
-    await joinRoom(user);
+    await joinAndDeploy(user);
     push('beginTurn', { currentPlayer: MY_ID });
 
     const original = socket.emit;

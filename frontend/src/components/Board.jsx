@@ -1,13 +1,12 @@
 import React, { useCallback, useRef, useState } from 'react';
-import clsx from 'clsx';
+import BoardGrid from './BoardGrid';
 import Cell from './Cell';
 import { BOARD_SIZE } from '../game/logic';
 
-const COLUMNS = Array.from({ length: BOARD_SIZE }, (_, i) => String.fromCharCode(65 + i));
 const clamp = (v) => Math.max(0, Math.min(BOARD_SIZE - 1, v));
 
 /**
- * Tablero de 10x10 con coordenadas A-J / 1-10.
+ * Tablero de juego.
  *
  * El tablero enemigo se puede jugar con el teclado: las flechas mueven la mira
  * y Enter o Espacio disparan (tabindex móvil, un solo tab-stop para todo el tablero).
@@ -50,68 +49,31 @@ const Board = ({
   if (!Array.isArray(grid) || grid.length === 0) return null;
 
   return (
-    <div
+    <BoardGrid
       ref={gridRef}
-      role="grid"
-      aria-label={isPlayer ? 'Tu tablero' : 'Tablero enemigo'}
-      aria-disabled={disabled || undefined}
+      ariaLabel={isPlayer ? 'Tu tablero' : 'Tablero enemigo'}
+      hover={hover}
+      disabled={disabled}
+      className={disabled && !isPlayer ? 'board-locked' : undefined}
       onKeyDown={handleKeyDown}
       onMouseLeave={() => setHover(null)}
-      className={clsx(
-        'grid w-full select-none gap-[2px] sm:gap-[3px]',
-        disabled && !isPlayer && 'board-locked'
+      renderCell={(row, col) => (
+        <Cell
+          cell={grid[row][col]}
+          row={row}
+          col={col}
+          isPlayer={isPlayer}
+          hideResults={hideResults}
+          revealAll={revealAll}
+          disabled={disabled}
+          isLast={lastShot?.row === row && lastShot?.col === col}
+          isCrosshair={!isPlayer && (hover?.row === row || hover?.col === col)}
+          focusable={cursor.row === row && cursor.col === col}
+          onFire={onFire}
+          onHover={handleHover}
+        />
       )}
-      style={{ gridTemplateColumns: `1.25rem repeat(${BOARD_SIZE}, minmax(0, 1fr))` }}
-    >
-      {/* Cabecera con las letras de columna */}
-      <div role="row" className="contents">
-        <span aria-hidden="true" />
-        {COLUMNS.map((letter, col) => (
-          <span
-            key={letter}
-            role="columnheader"
-            className={clsx(
-              'pb-1 text-center text-[0.6rem] font-bold tracking-wider transition-colors sm:text-xs',
-              hover?.col === col ? 'text-radar' : 'text-slate-500'
-            )}
-          >
-            {letter}
-          </span>
-        ))}
-      </div>
-
-      {grid.map((row, rowIndex) => (
-        <div role="row" className="contents" key={rowIndex}>
-          <span
-            role="rowheader"
-            className={clsx(
-              'grid place-items-center pr-1 text-[0.6rem] font-bold tabular transition-colors sm:text-xs',
-              hover?.row === rowIndex ? 'text-radar' : 'text-slate-500'
-            )}
-          >
-            {rowIndex + 1}
-          </span>
-
-          {row.map((cell, colIndex) => (
-            <Cell
-              key={colIndex}
-              cell={cell}
-              row={rowIndex}
-              col={colIndex}
-              isPlayer={isPlayer}
-              hideResults={hideResults}
-              revealAll={revealAll}
-              disabled={disabled}
-              isLast={lastShot?.row === rowIndex && lastShot?.col === colIndex}
-              isCrosshair={!isPlayer && (hover?.row === rowIndex || hover?.col === colIndex)}
-              focusable={cursor.row === rowIndex && cursor.col === colIndex}
-              onFire={onFire}
-              onHover={handleHover}
-            />
-          ))}
-        </div>
-      ))}
-    </div>
+    />
   );
 };
 

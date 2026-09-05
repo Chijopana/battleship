@@ -4,15 +4,21 @@
  */
 
 export const BOARD_SIZE = 10;
-export const SHIP_SIZES = [5, 4, 3, 3, 2];
-export const TOTAL_SHIPS = SHIP_SIZES.length;
 
-export const SHIP_NAMES = {
-  5: 'Portaaviones',
-  4: 'Acorazado',
-  3: 'Submarino',
-  2: 'Patrullera',
-};
+/**
+ * La flota, en orden. Cada barco tiene nombre propio: había dos de eslora 3 y
+ * llamar "Submarino" a los dos hacía imposible referirse a uno en concreto.
+ */
+export const SHIP_CLASSES = [
+  { size: 5, name: 'Portaaviones' },
+  { size: 4, name: 'Acorazado' },
+  { size: 3, name: 'Crucero' },
+  { size: 3, name: 'Submarino' },
+  { size: 2, name: 'Destructor' },
+];
+
+export const SHIP_SIZES = SHIP_CLASSES.map(s => s.size);
+export const TOTAL_SHIPS = SHIP_CLASSES.length;
 
 /** Tablero vacío de BOARD_SIZE x BOARD_SIZE. */
 export const createEmptyBoard = () =>
@@ -55,7 +61,7 @@ export const placeShips = (sizes = SHIP_SIZES, random = Math.random) => {
       if (positions.some(([r, c]) => board[r][c].hasShip)) continue;
 
       positions.forEach(([r, c]) => { board[r][c].hasShip = true; });
-      ships.push({ size, positions, hits: 0, sunk: false });
+      ships.push({ size, name: SHIP_CLASSES[ships.length]?.name ?? `Barco ${size}`, positions, hits: 0, sunk: false });
       placed = true;
     }
 

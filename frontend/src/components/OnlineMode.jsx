@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import clsx from 'clsx';
-import { fleetPayload } from '../game/logic';
 
 const SERVER_URL =
   import.meta.env.VITE_SOCKET_URL ||
@@ -113,14 +112,6 @@ const OnlineMode = ({ isOnline, setIsOnline, setSocketInstance, online }) => {
     const s = socketRef.current;
     if (!s) return;
 
-    /** Reparte flota nueva y la envía al servidor. */
-    const sendFleet = (room) => {
-      const ships = handlersRef.current.startGame(true);
-      s.emit('sendBoard', { gameId: room, ships: fleetPayload(ships) }, (res) => {
-        if (res?.error) handlersRef.current.say(res.error, 'bad');
-      });
-    };
-
     const listeners = {
       playerJoined: ({ players }) => {
         setOpponents(players.length);
@@ -184,8 +175,9 @@ const OnlineMode = ({ isOnline, setIsOnline, setSocketInstance, online }) => {
       gameRestarted: () => {
         stopGraceCountdown();
         handlersRef.current.onRestartState({ waiting: false, opponentWants: false });
-        sendFleet(joinedRoomRef.current);
-        handlersRef.current.say('Nueva ronda. ¡Suerte!', 'good');
+        // El servidor vacía las flotas al reiniciar: se vuelve a desplegar
+        handlersRef.current.startGame();
+        handlersRef.current.say('Nueva ronda: coloca tu flota otra vez.', 'good');
       },
     };
 
@@ -217,10 +209,9 @@ const OnlineMode = ({ isOnline, setIsOnline, setSocketInstance, online }) => {
       setIsOnline(true);
       setStatus(`En la sala ${room}. Esperando rival…`);
 
-      const ships = handlersRef.current.startGame(true);
-      s.emit('sendBoard', { gameId: room, ships: fleetPayload(ships) }, (r) => {
-        if (r?.error) handlersRef.current.say(r.error, 'bad');
-      });
+      // App necesita la sala para mandar la flota al confirmar el despliegue
+      handlersRef.current.setRoom(room);
+      handlersRef.current.startGame();
     });
   }, [setIsOnline, setRoom]);
 
@@ -246,7 +237,8 @@ const OnlineMode = ({ isOnline, setIsOnline, setSocketInstance, online }) => {
     setOpponents(0);
     setStatus('Sin conectar');
     setIsOnline(false);
-    handlersRef.current.startGame(false); // volver al tablero local con partida limpia
+    handlersRef.current.setRoom('');
+    handlersRef.current.startGame(); // volver al modo local con partida limpia
   }, [setIsOnline, setRoom, stopGraceCountdown]);
 
   const copyId = useCallback(async () => {

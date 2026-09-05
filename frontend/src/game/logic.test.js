@@ -85,7 +85,7 @@ describe('applyShot', () => {
   it('marca tocado y luego hundido, y pinta todo el barco', () => {
     let { board, ships } = fixedFleet();
 
-    // La patrullera está en la fila 4, columnas 0 y 1
+    // El destructor está en la fila 4, columnas 0 y 1
     let res = applyShot(board, ships, 4, 0);
     expect(res.result).toBe('tocado');
     expect(res.board[4][0].sunk).toBe(false);
