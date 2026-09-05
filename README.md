@@ -29,10 +29,12 @@ disparado y el resultado que se le comunicó, igual que vería una persona.
 frontend/
   src/
     game/          Lógica pura sin React: tablero, disparos, IA y modos
-      logic.js     createEmptyBoard, placeShips, applyShot, markEnemyShot
+      logic.js     createEmptyBoard, placeShips, applyShot, markShot
       bot.js       IA: modo caza (persigue un barco) y modo búsqueda (patrón de damas)
       modes.js     Configuración de los cinco modos y las tres dificultades
-    components/    Board, Cell, FleetStatus, OnlineMode, AudioController
+      placement.js Colocación manual: validación, rotación y relleno automático
+    components/    BoardGrid, Board, Cell, PlacementBoard, FleetStatus,
+                   OnlineMode, AudioController
     hooks/         useSound (Web Audio API)
     App.jsx        Estado de partida y orquestación de turnos
 backend/
